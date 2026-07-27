@@ -1,0 +1,25 @@
+# OS & System
+.DS_Store
+
+# Inter-Process Communication & Runtime Sockets
+/tmp/*.sock
+
+# Node / VS Code Extension
+node_modules/
+out/
+dist/
+*.vsix
+
+# Python Orchestrator
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local Vector Storage & Model Caches
+*.lancedb
+/data/vector_index/
+.ollama/
+
+# Rust / Warp CLI
+target/
