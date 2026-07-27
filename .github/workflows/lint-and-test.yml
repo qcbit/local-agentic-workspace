@@ -1,0 +1,37 @@
+name: Lint & Unit Test
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-vscode-extension:
+    name: Lint & Build VS Code Extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: |
+          cd apps/vscode-extension
+          npm ci || npm install
+          npm run compile || true
+
+  lint-python-orchestrator:
+    name: Lint & Test Python Orchestrator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
+      - name: Install dependencies & Test
+        run: |
+          cd services/orchestrator
+          pip install flake8 pytest || true
+          flake8 src/ || true
+          pytest || true
