@@ -1,0 +1,25 @@
+name: Air-Gap Compliance Audit
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  airgap-scan:
+    name: Static Code Network Egress Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit for non-localhost HTTP endpoints
+        run: |
+          echo "Auditing codebase for unauthorized external endpoints..."
+          # Fail if external http/https URLs are hardcoded outside allowed local/localhost schemas
+          FOUND=$(grep -rnE 'https?://' apps/ services/ packages/ | grep -v '127.0.0.1' | grep -v 'localhost' | grep -v 'schema.org' || true)
+          if [ -n "$FOUND" ]; then
+            echo "ERROR: Found potential external network references:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "Air-gap audit passed: No external HTTP endpoints found."
