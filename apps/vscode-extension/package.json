@@ -1,0 +1,43 @@
+{
+  "name": "local-agentic-workspace",
+  "displayName": "Local Agentic Workspace",
+  "version": "0.1.0",
+  "description": "Air-gapped local agentic coding assistant for VS Code and Warp Terminal",
+  "publisher": "local-dev",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "localAgenticContainer",
+          "title": "Local Agent",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "localAgenticContainer": [
+        {
+          "type": "webview",
+          "id": "localAgenticChat",
+          "name": "Agent Chat & State",
+          "icon": "resources/icon.svg",
+          "contextualTitle": "Local Agentic Assistant"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
