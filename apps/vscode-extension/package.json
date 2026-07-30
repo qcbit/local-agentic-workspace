@@ -2,13 +2,23 @@
   "name": "local-agentic-workspace",
   "displayName": "Local Agentic Workspace",
   "version": "0.1.0",
-  "description": "Air-gapped local agentic coding assistant for VS Code and Warp Terminal",
+  "description": "Air-gapped local agentic coding assistant for VS Code",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.85.0"
   },
   "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:localAgentic.testAST"
+  ],
   "contributes": {
+    "commands": [
+      {
+        "command": "localAgentic.testAST",
+        "title": "LocalAgentic: testAST"
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {
@@ -33,11 +43,21 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "test": "mocha -r ts-node/register \"test/**/*.spec.ts\""
   },
   "devDependencies": {
+    "@types/chai": "^4.3.4",
+    "@types/emscripten": "^1.39.10",
+    "@types/mocha": "^10.0.1",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "chai": "^4.3.8",
+    "mocha": "^10.2.0",
+    "ts-node": "^10.9.1",
     "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "web-tree-sitter": "^0.26.11"
   }
 }
