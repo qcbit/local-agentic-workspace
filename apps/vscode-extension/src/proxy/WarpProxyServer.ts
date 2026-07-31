@@ -5,51 +5,77 @@ import * as vscode from 'vscode';
 export class WarpProxyServer {
     private app = express();
     private server: http.Server | null = null;
-    
-    // We will use 11435 to sit right next to Ollama's default 11434
     private readonly port = 11435; 
 
     constructor() {
         this.setupRoutes();
     }
 
+    private getActiveProfile() {
+        const config = vscode.workspace.getConfiguration('localAgentic');
+        const activeId = config.get<string>('activeProfile');
+        const profiles = config.get<any[]>('profiles') || [];
+        
+        return profiles.find(p => p.id === activeId) || profiles[0];
+    }
+
     private setupRoutes() {
-        // Warp sends JSON payloads, so we must parse them
         this.app.use(express.json());
 
-        // Intercept OpenAI-style chat completion requests
-        this.app.post('/v1/chat/completions', (req, res) => {
-            console.log('🚀 Intercepted Warp Request:', JSON.stringify(req.body, null, 2));
+        this.app.post('/v1/chat/completions', async (req, res) => {
+            const profile = this.getActiveProfile();
+            
+            if (!profile) {
+                res.status(500).json({ error: "No active AI profile configured." });
+                return;
+            }
 
-            // Mock OpenAI-compatible response to prove the intercept works
-            res.json({
-                id: 'chatcmpl-mock',
-                object: 'chat.completion',
-                created: Date.now(),
-                model: 'local-agentic-proxy',
-                choices: [{
-                    index: 0,
-                    message: {
-                        role: 'assistant',
-                        content: 'Proxy intercept successful! I am ready to process this terminal command.'
+            console.log(`🚀 Routing request to: ${profile.name} (${profile.endpointUrl})`);
+
+            try {
+                // Swap the model name in the payload to match the profile's model
+                const payload = { ...req.body, model: req.body.model || profile.model };
+
+                // Forward the request to the active LLM
+                const targetUrl = `${profile.endpointUrl.replace(/\/$/, '')}${req.path}`;
+                console.log(`🔍 DEBUG: Constructed targetUrl -> ${targetUrl}`);
+                const response = await fetch(targetUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': profile.apiKey === 'none' ? '' : `Bearer ${profile.apiKey}`
                     },
-                    finish_reason: 'stop'
-                }]
-            });
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`LLM upstream error: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                res.json(data);
+
+            } catch (error: any) {
+                console.error('Proxy Error:', error);
+                res.status(500).json({
+                    error: {
+                        message: `Failed to route to ${profile.name}: ${error.message}`,
+                        type: "proxy_routing_error"
+                    }
+                });
+            }
         });
     }
 
     public start() {
-        this.server = this.app.listen(this.port, () => {
-            console.log(`Local Agentic Proxy running on http://localhost:${this.port}`);
-            vscode.window.showInformationMessage(`Warp Proxy started on port ${this.port}`);
+        this.server = this.app.listen(this.port, '127.0.0.1', () => {
+            console.log(`Local Agentic Proxy running on http://127.0.0.1:${this.port}`);
         });
     }
 
     public stop() {
         if (this.server) {
             this.server.close();
-            console.log('Local Agentic Proxy stopped.');
         }
     }
 }

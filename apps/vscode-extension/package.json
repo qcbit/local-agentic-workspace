@@ -9,11 +9,46 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
+    "*",
     "onStartupFinished",
     "onCommand:localAgentic.testAST"
   ],
   "contributes": {
+    "configuration": {
+      "title": "Local Agentic Workspace",
+      "properties": {
+        "localAgentic.activeProfile": {
+          "type": "string",
+          "default": "local-ollama",
+          "description": "The ID of the currently active BYOA profile."
+        },
+        "localAgentic.profiles": {
+          "type": "array",
+          "default": [
+            {
+              "id": "local-ollama",
+              "name": "Home (Ollama)",
+              "endpointUrl": "http://127.0.0.1:11434",
+              "apiKey": "none",
+              "model": "llama3"
+            },
+            {
+              "id": "work-azure",
+              "name": "Work (Azure Foundry)",
+              "endpointUrl": "https://your-enterprise-endpoint.azure.com/v1/chat/completions",
+              "apiKey": "YOUR_AZURE_KEY",
+              "model": "gpt-4-turbo"
+            }
+          ],
+          "description": "Array of LLM profiles for dynamic proxy routing."
+        }
+      }
+    },
     "commands": [
+      {
+        "command": "localAgentic.switchProfile",
+        "title": "LocalAgentic: Switch AI Profile"
+      },
       {
         "command": "localAgentic.testAST",
         "title": "LocalAgentic: testAST"
