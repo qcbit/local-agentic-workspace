@@ -17,6 +17,10 @@
       {
         "command": "localAgentic.testAST",
         "title": "LocalAgentic: testAST"
+      },
+      {
+        "command": "localAgentic.showProposedDiff",
+        "title": "LocalAgentic: Show Proposed Diff"
       }
     ],
     "viewsContainers": {
