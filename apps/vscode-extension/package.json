@@ -53,6 +53,7 @@
   "devDependencies": {
     "@types/chai": "^4.3.4",
     "@types/emscripten": "^1.39.10",
+    "@types/express": "^5.0.6",
     "@types/mocha": "^10.0.1",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
@@ -62,6 +63,7 @@
     "typescript": "^5.3.0"
   },
   "dependencies": {
+    "express": "^5.2.1",
     "web-tree-sitter": "^0.26.11"
   }
 }

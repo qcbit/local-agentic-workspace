@@ -2,14 +2,22 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { ASTProvider } from './ast/ASTProvider';
 import { AgenticDiffProvider } from './providers/DiffProvider';
+import { WarpProxyServer } from './proxy/WarpProxyServer';
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Local Agentic Workspace extension is now active.');
 
-    // 1. Initialize the AST Provider (from Task 2.2)
+    // 1. Start the Warp Proxy Server (Task 2.4)
+    const proxyServer = new WarpProxyServer();
+    proxyServer.start();
+    
+    // Ensure the server shuts down when the extension deactivates
+    context.subscriptions.push({ dispose: () => proxyServer.stop() });
+
+    // 2. Initialize the AST Provider (from Task 2.2)
     const astProvider = new ASTProvider(context.extensionUri);
 
-    // 2. Register the Diff Provider (Task 2.3)
+    // 3. Register the Diff Provider (Task 2.3)
     const diffProvider = new AgenticDiffProvider();
     context.subscriptions.push(
         vscode.workspace.registerTextDocumentContentProvider(
@@ -18,12 +26,12 @@ export function activate(context: vscode.ExtensionContext) {
         )
     );
 
-    // 3. Register the AST Test Command (from Task 2.2)
+    // 4. Register the AST Test Command (from Task 2.2)
     const testAstCommand = vscode.commands.registerCommand('localAgentic.testAST', async () => {
         // ... (Keep your existing AST test code here)
     });
 
-    // 4. Register the Semantic Diff Command
+    // 5. Register the Semantic Diff Command
     const showDiffCommand = vscode.commands.registerCommand('localAgentic.showProposedDiff', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
