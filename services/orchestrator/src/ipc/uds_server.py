@@ -5,7 +5,7 @@ import stat
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # Dynamically resolve the project root to ensure imports work from any execution path
 project_root = str(Path(__file__).resolve().parent.parent.parent.parent.parent)
@@ -20,8 +20,24 @@ logger = logging.getLogger(__name__)
 class JsonRpcUdsServer:
     """JSON-RPC 2.0 Server over Unix Domain Sockets."""
     
-    def __init__(self, socket_path: str = "/tmp/agent.sock"):
-        self.socket_path = socket_path
+    def __init__(self, socket_path: Optional[str] = None):
+        # Default to placing the socket directly in the project root to avoid symlink issues
+        if socket_path is None:
+            self.socket_path = os.path.join(project_root, ".agent.sock")
+        else:
+            self.socket_path = socket_path
+            
+        self.config = self._load_config()
+
+    def _load_config(self) -> Dict[str, Any]:
+        """Loads the orchestrator configuration from disk."""
+        config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load config.json: {e}. Using defaults.")
+            return {}
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Reads incoming streams, dispatches JSON-RPC requests, and writes responses."""
@@ -100,8 +116,15 @@ class JsonRpcUdsServer:
 
     def _run_agent_sync(self, goal: str):
         """Synchronous wrapper to instantiate and run the agent."""
-        llm = OllamaProxyProvider()
-        agent = Agent(llm_provider=llm)
+        llm_config = self.config.get("llm", {})
+        
+        llm = OllamaProxyProvider(
+            endpoint_url=llm_config.get("endpoint_url", "http://127.0.0.1:11435/v1/chat/completions"),
+            model=llm_config.get("model_name", "llama3:8b")
+        )
+        
+        # Pass the full config object into the Agent
+        agent = Agent(llm_provider=llm, config=self.config)
         return agent.run(goal)
 
     def _success_response(self, req_id: Any, result: Any) -> Dict[str, Any]:

@@ -1,0 +1,16 @@
+{
+    "llm": {
+        "model_name": "llama3:8b",
+        "endpoint_url": "http://127.0.0.1:11435/v1/chat/completions"
+    },
+    "memory": {
+        "max_tokens": 6000,
+        "token_heuristics": {
+            "llama3:8b": 4.0,
+            "qwen2.5-coder": 4.5,
+            "gpt-4": 4.0,
+            "claude-3": 4.2,
+            "default": 3.5
+        }
+    }
+}
