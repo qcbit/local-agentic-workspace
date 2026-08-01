@@ -166,8 +166,12 @@ class Agent:
             # Handle task completion
             if tool_name == "finish_task":
                 state.is_complete = True
-                observation = "Task completed successfully."
-                print(f"✅ [Observation] {observation}")
+                # Extract the LLM's custom summary, fallback to a default string if missing
+                summary = tool_args.get("summary", "Task completed successfully.")
+                print(f"✅ [Observation] {summary}")
+                
+                # Append the final tool observation to the history BEFORE breaking
+                state.history.append(Message(role=Role.TOOL, content=summary, name=tool_name))
                 break
 
             # 4. Tool Call & Observation
