@@ -5,7 +5,7 @@ import stat
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # Dynamically resolve the project root to ensure imports work from any execution path
 project_root = str(Path(__file__).resolve().parent.parent.parent.parent.parent)
@@ -20,8 +20,24 @@ logger = logging.getLogger(__name__)
 class JsonRpcUdsServer:
     """JSON-RPC 2.0 Server over Unix Domain Sockets."""
     
-    def __init__(self, socket_path: str = "/tmp/agent.sock"):
-        self.socket_path = socket_path
+    def __init__(self, socket_path: Optional[str] = None):
+        # Default to placing the socket directly in the project root to avoid symlink issues
+        if socket_path is None:
+            self.socket_path = os.path.join(project_root, ".agent.sock")
+        else:
+            self.socket_path = socket_path
+            
+        self.config = self._load_config()
+
+    def _load_config(self) -> Dict[str, Any]:
+        """Loads the orchestrator configuration from disk."""
+        config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load config.json: {e}. Using defaults.")
+            return {}
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Reads incoming streams, dispatches JSON-RPC requests, and writes responses."""
@@ -90,18 +106,55 @@ class JsonRpcUdsServer:
                     logger.error(f"Agent execution failed: {e}")
                     return self._error_response(req_id, -32000, f"Agent execution error: {str(e)}")
                     
+            # Route 3: Settings Updater (ADD THIS BLOCK HERE)
+            elif method == "update_config":
+                active_profile = params.get("active_profile", "home")
+                profile_settings = params.get("profile_settings", {})
+                
+                # Update active profile marker
+                self.config["active_profile"] = active_profile
+                
+                # Merge the new settings into that specific profile
+                if "profiles" not in self.config:
+                    self.config["profiles"] = {}
+                if active_profile not in self.config["profiles"]:
+                    self.config["profiles"][active_profile] = {}
+                    
+                self.config["profiles"][active_profile].update(profile_settings)
+                
+                # Write to disk so it persists across server restarts
+                config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(self.config, f, indent=4)
+                    
+                logger.info(f"⚙️ Orchestrator configuration updated. Active profile: {active_profile}")
+                return self._success_response(req_id, {"status": "config_updated"})
             else:
-                return self._error_response(req_id, -32601, "Method not found")
+                return self._error_response(req_id, -32601, "Method '{method}' not found")
                 
         except json.JSONDecodeError:
             return self._error_response(None, -32700, "Parse error")
         except Exception as e:
-            return self._error_response(req.get("id"), -32603, f"Internal error: {str(e)}")
-
+            logger.error(f"Internal error processing request: {e}")
+            return self._error_response(req.get("id") if isinstance(req, dict) else None, -32603, str(e))
     def _run_agent_sync(self, goal: str):
         """Synchronous wrapper to instantiate and run the agent."""
-        llm = OllamaProxyProvider()
-        agent = Agent(llm_provider=llm)
+        
+        # 1. Determine which profile is active
+        active_profile_name = self.config.get("active_profile", "home")
+        profiles = self.config.get("profiles", {})
+        active_config = profiles.get(active_profile_name, {})
+        
+        # 2. Extract LLM settings for this specific environment
+        llm_config = active_config.get("llm", {})
+        
+        llm = OllamaProxyProvider(
+            endpoint_url=llm_config.get("endpoint_url", "http://127.0.0.1:11435/v1/chat/completions"),
+            model=llm_config.get("model_name", "llama3:8b")
+        )
+        
+        # Pass the environment-specific config down to the Agent
+        agent = Agent(llm_provider=llm, config=active_config)
         return agent.run(goal)
 
     def _success_response(self, req_id: Any, result: Any) -> Dict[str, Any]:

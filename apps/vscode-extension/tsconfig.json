@@ -11,6 +11,7 @@
     "sourceMap": true,
     "rootDir": "src",
     "strict": true,
+    "jsx": "react",
     "esModuleInterop": true,
     "types": [
       "node",

@@ -1,4 +1,5 @@
 import json
+import logging
 from enum import Enum
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
@@ -6,6 +7,11 @@ import urllib.request
 import urllib.error
 import os
 import subprocess
+import time
+
+from services.orchestrator.src.memory.context_manager import SlidingContextManager
+
+logger = logging.getLogger(__name__)
 
 # --- State Definitions ---
 
@@ -28,6 +34,7 @@ class AgentState:
     is_complete: bool = False
     iterations: int = 0
     max_iterations: int = 10
+    summary: str = ""  # to track the running summary 
 
 # --- Tool Dispatcher ---
 
@@ -92,9 +99,22 @@ class ToolDispatcher:
 # --- Agent Core ---
 
 class Agent:
-    def __init__(self, llm_provider):
-        self.dispatcher = ToolDispatcher()
+    """The central state machine managing the ReAct loop."""
+
+    def __init__(self, llm_provider, config: Dict[str, Any]):
         self.llm_provider = llm_provider
+        self.dispatcher = ToolDispatcher()
+        self.max_iterations = 10
+        
+        # Initialize memory with the loaded config
+        llm_config = config.get("llm", {})
+        memory_config = config.get("memory", {})
+        
+        self.memory = SlidingContextManager(
+            memory_config=memory_config,
+            model_name=llm_config.get("model_name", "llama3:8b"),
+            llm_provider=self.llm_provider,
+        )
 
     def context_assembly(self, state: AgentState) -> List[Dict[str, str]]:
         """Assembles the user goal and historical state into the LLM context window."""
@@ -150,8 +170,20 @@ class Agent:
         while not state.is_complete and state.iterations < state.max_iterations:
             print(f"\n🔄 --- Iteration {state.iterations + 1} ---")
             
-            # 1. Context Assembly
-            context = self.context_assembly(state)
+            # 1. Assemble Context using the new manager
+            system_prompt = (
+                "You are an autonomous agent. You must respond ONLY with valid JSON. "
+                "Do not include any conversational text or markdown formatting. "
+                "You have access to the following tools:\n"
+                "1. 'terminal_proxy' - args: {\"command\": \"<bash command>\"}\n"
+                "2. 'file_system' - args: {\"action\": \"<read/write>\", \"path\": \"<file path>\"}\n"
+                "3. 'finish_task' - args: {\"summary\": \"<summary of results>\"}\n\n"
+                "Your output must be a single JSON object with EXACTLY these keys: "
+                "\"reasoning\" (string), \"tool\" (string), and \"tool_args\" (dictionary). "
+                "When you have achieved the user's goal based on the observations, you MUST call 'finish_task'."
+            )
+            
+            context = self.memory.build_safe_context(state, system_prompt)
             
             # 2. Reasoning
             llm_response = self.reason(context)
@@ -201,43 +233,41 @@ class OllamaProxyProvider:
         self.endpoint_url = endpoint_url
         self.model = model
 
-    def generate(self, context: List[Dict[str, str]]) -> str:
+    def generate(self, context: List[Dict[str, str]], require_json: bool = True) -> Optional[str]:
         payload = {
             "model": self.model,
-            "messages": context,
-            "format": "json"
+            "messages": context
         }
-        
-        req = urllib.request.Request(
-            self.endpoint_url, 
-            data=json.dumps(payload).encode('utf-8'),
-            headers={'Content-Type': 'application/json'},
-            method='POST'
-        )
-
-        try:
-            with urllib.request.urlopen(req) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                return result['choices'][0]['message']['content']
-                
-        except urllib.error.HTTPError as e:
-            # Catches API errors (e.g., 404 Not Found, 500 Server Error)
-            error_msg = e.read().decode('utf-8')
-            print(f"❌ [HTTP Error {e.code}] Proxy response: {error_msg}")
-            return json.dumps({
-                "reasoning": f"HTTP Error from proxy: {error_msg}",
-                "tool": "error",
-                "tool_args": {}
-            })
+        if require_json:
+            payload["format"] = "json"
             
-        except urllib.error.URLError as e:
-            # Catches connection failures (e.g., proxy not running)
-            print(f"❌ [Connection Error] Failed to reach proxy: {e.reason}")
-            return json.dumps({
-                "reasoning": f"Connection Error: {e.reason}",
-                "tool": "error",
-                "tool_args": {}
-            })
+        data = json.dumps(payload).encode('utf-8')
+        
+        # Retry loop for slow startup or transient drops
+        max_retries = 3
+        backoff_seconds = 1.5
+        
+        for attempt in range(max_retries):
+            try:
+                req = urllib.request.Request(
+                    self.endpoint_url, 
+                    data=data,
+                    headers={'Content-Type': 'application/json'},
+                    method='POST'
+                )
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    res_body = response.read().decode('utf-8')
+                    res_json = json.loads(res_body)
+                    return res_json["choices"][0]["message"]["content"]
+                    
+            except urllib.error.URLError as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ [Connection Error] Failed to reach proxy after {max_retries} attempts: {e.reason}")
+                    raise RuntimeError(f"LLM Provider unreachable: {e.reason}")
+                
+                logger.warning(f"⚠️ Proxy not ready (attempt {attempt + 1}/{max_retries}), retrying in {backoff_seconds}s...")
+                time.sleep(backoff_seconds)
+                backoff_seconds *= 2  # Exponential backoff
 
 # --- Mock Implementation for Testing ---
 

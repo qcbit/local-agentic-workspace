@@ -17,10 +17,21 @@
     "configuration": {
       "title": "Local Agentic Workspace",
       "properties": {
-        "localAgentic.activeProfile": {
+        "localAgenticWorkspace.llm.modelName": {
           "type": "string",
-          "default": "local-ollama",
-          "description": "The ID of the currently active BYOA profile."
+          "default": "llama3:8b",
+          "description": "The local Ollama model to use for inference."
+        },
+        "localAgenticWorkspace.memory.maxTokens": {
+          "type": "number",
+          "default": 6000,
+          "description": "The maximum token context window before summarization triggers."
+        },
+        "localAgenticWorkspace.activeProfile": {
+          "type": "string",
+          "enum": ["home", "work"],
+          "default": "home",
+          "description": "Switch between Home and Work BYOA environments."
         },
         "localAgentic.profiles": {
           "type": "array",
@@ -45,6 +56,10 @@
       }
     },
     "commands": [
+      {
+        "command": "localAgenticWorkspace.showSettings",
+        "title": "Agentic Workspace: Open Settings"
+      },
       {
         "command": "localAgentic.switchProfile",
         "title": "LocalAgentic: Switch AI Profile"
@@ -81,9 +96,10 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && npm run build:webview",
     "watch": "tsc -watch -p ./",
-    "test": "mocha -r ts-node/register \"test/**/*.spec.ts\""
+    "test": "mocha -r ts-node/register \"test/**/*.spec.ts\"",
+    "build:webview": "node esbuild.webview.js"
   },
   "devDependencies": {
     "@types/chai": "^4.3.4",
@@ -91,14 +107,19 @@
     "@types/express": "^5.0.6",
     "@types/mocha": "^10.0.1",
     "@types/node": "^20.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "@types/vscode": "^1.85.0",
     "chai": "^4.3.8",
+    "esbuild": "^0.28.1",
     "mocha": "^10.2.0",
     "ts-node": "^10.9.1",
     "typescript": "^5.3.0"
   },
   "dependencies": {
     "express": "^5.2.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "web-tree-sitter": "^0.26.11"
   }
 }
