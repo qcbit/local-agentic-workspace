@@ -1,4 +1,5 @@
 import json
+import logging
 from enum import Enum
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
@@ -6,8 +7,11 @@ import urllib.request
 import urllib.error
 import os
 import subprocess
+import time
 
 from services.orchestrator.src.memory.context_manager import SlidingContextManager
+
+logger = logging.getLogger(__name__)
 
 # --- State Definitions ---
 
@@ -229,46 +233,41 @@ class OllamaProxyProvider:
         self.endpoint_url = endpoint_url
         self.model = model
 
-    def generate(self, context: List[Dict[str, str]], require_json: bool = True) -> str:
+    def generate(self, context: List[Dict[str, str]], require_json: bool = True) -> Optional[str]:
         payload = {
             "model": self.model,
-            "messages": context,
+            "messages": context
         }
-        
-        # Only enforce JSON when the state machine needs it
         if require_json:
             payload["format"] = "json"
             
-        req = urllib.request.Request(
-            self.endpoint_url, 
-            data=json.dumps(payload).encode('utf-8'),
-            headers={'Content-Type': 'application/json'},
-            method='POST'
-        )
-
-        try:
-            with urllib.request.urlopen(req) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                return result['choices'][0]['message']['content']
+        data = json.dumps(payload).encode('utf-8')
+        
+        # Retry loop for slow startup or transient drops
+        max_retries = 3
+        backoff_seconds = 1.5
+        
+        for attempt in range(max_retries):
+            try:
+                req = urllib.request.Request(
+                    self.endpoint_url, 
+                    data=data,
+                    headers={'Content-Type': 'application/json'},
+                    method='POST'
+                )
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    res_body = response.read().decode('utf-8')
+                    res_json = json.loads(res_body)
+                    return res_json["choices"][0]["message"]["content"]
+                    
+            except urllib.error.URLError as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ [Connection Error] Failed to reach proxy after {max_retries} attempts: {e.reason}")
+                    raise RuntimeError(f"LLM Provider unreachable: {e.reason}")
                 
-        except urllib.error.HTTPError as e:
-            # Catches API errors (e.g., 404 Not Found, 500 Server Error)
-            error_msg = e.read().decode('utf-8')
-            print(f"❌ [HTTP Error {e.code}] Proxy response: {error_msg}")
-            return json.dumps({
-                "reasoning": f"HTTP Error from proxy: {error_msg}",
-                "tool": "error",
-                "tool_args": {}
-            })
-            
-        except urllib.error.URLError as e:
-            # Catches connection failures (e.g., proxy not running)
-            print(f"❌ [Connection Error] Failed to reach proxy: {e.reason}")
-            return json.dumps({
-                "reasoning": f"Connection Error: {e.reason}",
-                "tool": "error",
-                "tool_args": {}
-            })
+                logger.warning(f"⚠️ Proxy not ready (attempt {attempt + 1}/{max_retries}), retrying in {backoff_seconds}s...")
+                time.sleep(backoff_seconds)
+                backoff_seconds *= 2  # Exponential backoff
 
 # --- Mock Implementation for Testing ---
 
