@@ -1,7 +1,7 @@
 import { UdsClient } from './UdsClient';
 
 async function runTest() {
-    const client = new UdsClient('/tmp/agent.sock');
+    const client = new UdsClient();
     
     try {
         console.log('🔄 Attempting to connect...');

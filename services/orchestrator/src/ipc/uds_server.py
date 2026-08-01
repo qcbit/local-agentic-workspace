@@ -106,25 +106,55 @@ class JsonRpcUdsServer:
                     logger.error(f"Agent execution failed: {e}")
                     return self._error_response(req_id, -32000, f"Agent execution error: {str(e)}")
                     
+            # Route 3: Settings Updater (ADD THIS BLOCK HERE)
+            elif method == "update_config":
+                active_profile = params.get("active_profile", "home")
+                profile_settings = params.get("profile_settings", {})
+                
+                # Update active profile marker
+                self.config["active_profile"] = active_profile
+                
+                # Merge the new settings into that specific profile
+                if "profiles" not in self.config:
+                    self.config["profiles"] = {}
+                if active_profile not in self.config["profiles"]:
+                    self.config["profiles"][active_profile] = {}
+                    
+                self.config["profiles"][active_profile].update(profile_settings)
+                
+                # Write to disk so it persists across server restarts
+                config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(self.config, f, indent=4)
+                    
+                logger.info(f"⚙️ Orchestrator configuration updated. Active profile: {active_profile}")
+                return self._success_response(req_id, {"status": "config_updated"})
             else:
-                return self._error_response(req_id, -32601, "Method not found")
+                return self._error_response(req_id, -32601, "Method '{method}' not found")
                 
         except json.JSONDecodeError:
             return self._error_response(None, -32700, "Parse error")
         except Exception as e:
-            return self._error_response(req.get("id"), -32603, f"Internal error: {str(e)}")
-
+            logger.error(f"Internal error processing request: {e}")
+            return self._error_response(req.get("id") if isinstance(req, dict) else None, -32603, str(e))
     def _run_agent_sync(self, goal: str):
         """Synchronous wrapper to instantiate and run the agent."""
-        llm_config = self.config.get("llm", {})
+        
+        # 1. Determine which profile is active
+        active_profile_name = self.config.get("active_profile", "home")
+        profiles = self.config.get("profiles", {})
+        active_config = profiles.get(active_profile_name, {})
+        
+        # 2. Extract LLM settings for this specific environment
+        llm_config = active_config.get("llm", {})
         
         llm = OllamaProxyProvider(
             endpoint_url=llm_config.get("endpoint_url", "http://127.0.0.1:11435/v1/chat/completions"),
             model=llm_config.get("model_name", "llama3:8b")
         )
         
-        # Pass the full config object into the Agent
-        agent = Agent(llm_provider=llm, config=self.config)
+        # Pass the environment-specific config down to the Agent
+        agent = Agent(llm_provider=llm, config=active_config)
         return agent.run(goal)
 
     def _success_response(self, req_id: Any, result: Any) -> Dict[str, Any]:
