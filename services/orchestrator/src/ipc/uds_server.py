@@ -21,9 +21,9 @@ class JsonRpcUdsServer:
     """JSON-RPC 2.0 Server over Unix Domain Sockets."""
     
     def __init__(self, socket_path: Optional[str] = None):
-        # Default to placing the socket directly in the project root to avoid symlink issues
+        # Bind universally to /tmp/agent.sock so Node.js can consistently find it
         if socket_path is None:
-            self.socket_path = os.path.join(project_root, ".agent.sock")
+            self.socket_path = "/tmp/agent.sock"
         else:
             self.socket_path = socket_path
             
@@ -106,7 +106,6 @@ class JsonRpcUdsServer:
                     logger.error(f"Agent execution failed: {e}")
                     return self._error_response(req_id, -32000, f"Agent execution error: {str(e)}")
                     
-            # Route 3: Settings Updater (ADD THIS BLOCK HERE)
             elif method == "update_config":
                 active_profile = params.get("active_profile", "home")
                 profile_settings = params.get("profile_settings", {})
@@ -130,13 +129,14 @@ class JsonRpcUdsServer:
                 logger.info(f"⚙️ Orchestrator configuration updated. Active profile: {active_profile}")
                 return self._success_response(req_id, {"status": "config_updated"})
             else:
-                return self._error_response(req_id, -32601, "Method '{method}' not found")
+                return self._error_response(req_id, -32601, f"Method '{method}' not found")
                 
         except json.JSONDecodeError:
             return self._error_response(None, -32700, "Parse error")
         except Exception as e:
             logger.error(f"Internal error processing request: {e}")
             return self._error_response(req.get("id") if isinstance(req, dict) else None, -32603, str(e))
+
     def _run_agent_sync(self, goal: str):
         """Synchronous wrapper to instantiate and run the agent."""
         

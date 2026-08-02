@@ -1,12 +1,15 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 import { ASTProvider } from './ast/ASTProvider';
 import { AgenticDiffProvider } from './providers/DiffProvider';
 import { UdsClient } from './ipc/UdsClient';
 import { WarpProxyServer } from './proxy/WarpProxyServer';
+import { ChatViewProvider } from './providers/ChatViewProvider';
 
-let statusBarItem: vscode.StatusBarItem;
 let udsClient: UdsClient;
+let proxyServer: WarpProxyServer;
+let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Local Agentic Workspace extension is now active.');
@@ -17,23 +20,43 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
     });
 
-    // 2. Register the Settings UI Command
-    let disposable = vscode.commands.registerCommand('localAgenticWorkspace.showSettings', () => {
+    // 2. Start the Warp Proxy Server natively inside VS Code
+    try {
+        proxyServer = new WarpProxyServer();
+        proxyServer.start();
+        context.subscriptions.push({ dispose: () => proxyServer.stop() });
+        console.log('Warp Proxy Server started successfully.');
+    } catch (error: any) {
+        vscode.window.showErrorMessage(`Failed to start proxy server: ${error.message}`);
+    }
+
+    // 3. Initialize the Status Bar (reads from config.json)
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'localAgenticWorkspace.showSettings'; // Clicking it opens settings!
+    context.subscriptions.push(statusBarItem);
+    updateStatusBar(); 
+
+    // Watch config.json for changes so the status bar updates automatically
+    const configWatcher = vscode.workspace.createFileSystemWatcher('**/services/orchestrator/config.json');
+    configWatcher.onDidChange(() => updateStatusBar());
+    configWatcher.onDidCreate(() => updateStatusBar());
+    context.subscriptions.push(configWatcher);
+
+    // 4. Register the Settings UI Command
+    let disposableSettings = vscode.commands.registerCommand('localAgenticWorkspace.showSettings', () => {
         const panel = vscode.window.createWebviewPanel(
             'agentSettings',
             'Agentic Workspace Settings',
             vscode.ViewColumn.One,
             {
-                enableScripts: true, // Required for React
+                enableScripts: true, 
                 localResourceRoots: [vscode.Uri.file(path.join(context.extensionPath, 'out'))]
             }
         );
 
-        // Get path to the compiled React bundle
         const scriptPathOnDisk = vscode.Uri.file(path.join(context.extensionPath, 'out', 'webview.js'));
         const scriptUri = panel.webview.asWebviewUri(scriptPathOnDisk);
 
-        // Inject the HTML shell
         panel.webview.html = `
             <!DOCTYPE html>
             <html lang="en">
@@ -49,11 +72,9 @@ export function activate(context: vscode.ExtensionContext) {
             </html>
         `;
 
-        // 3. Listen for the 'Save' button click from React
         panel.webview.onDidReceiveMessage(async (message) => {
             if (message.command === 'updateSetting') {
                 try {
-                    // Send the new config down the socket to Python
                     await udsClient.request('update_config', message.config);
                     vscode.window.showInformationMessage('Settings successfully synced to Orchestrator!');
                 } catch (error: any) {
@@ -63,55 +84,16 @@ export function activate(context: vscode.ExtensionContext) {
         });
     });
 
-    // 1. Start the Warp Proxy Server
-    const proxyServer = new WarpProxyServer();
-    proxyServer.start();
-    context.subscriptions.push({ dispose: () => proxyServer.stop() });
-
-    // 2. Setup the BYOA Status Bar Item
-    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    statusBarItem.command = 'localAgentic.switchProfile';
-    context.subscriptions.push(statusBarItem);
-    updateStatusBar(); // Initial render
-    statusBarItem.show();
-
-    // Listen for manual settings changes to keep the status bar in sync
+    // 5. Register the Chat Sidebar Provider
+    const chatProvider = new ChatViewProvider(context.extensionUri, udsClient);
     context.subscriptions.push(
-        vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration('localAgentic.activeProfile')) {
-                updateStatusBar();
-            }
-        })
+        vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatProvider)
     );
 
-    // 3. Command to switch profiles via QuickPick
-    const switchProfileCommand = vscode.commands.registerCommand('localAgentic.switchProfile', async () => {
-        const config = vscode.workspace.getConfiguration('localAgentic');
-        const profiles = config.get<any[]>('profiles') || [];
-        
-        const items = profiles.map(p => ({
-            label: p.name,
-            description: p.model,
-            profileId: p.id
-        }));
-
-        const selected = await vscode.window.showQuickPick(items, {
-            placeHolder: 'Select active AI routing profile'
-        });
-
-        if (selected) {
-            await config.update('activeProfile', selected.profileId, vscode.ConfigurationTarget.Global);
-            vscode.window.showInformationMessage(`Switched AI Profile to: ${selected.label}`);
-        }
-    });
-    
-    // Ensure the server shuts down when the extension deactivates
-    context.subscriptions.push({ dispose: () => proxyServer.stop() });
-
-    // 2. Initialize the AST Provider
+    // 6. Initialize the AST Provider
     const astProvider = new ASTProvider(context.extensionUri);
 
-    // 3. Register the Diff Provider
+    // 7. Register the Diff Provider
     const diffProvider = new AgenticDiffProvider();
     context.subscriptions.push(
         vscode.workspace.registerTextDocumentContentProvider(
@@ -120,12 +102,12 @@ export function activate(context: vscode.ExtensionContext) {
         )
     );
 
-    // 4. Register the AST Test Command (from Task 2.2)
+    // 8. Register the AST Test Command (from Task 2.2)
     const testAstCommand = vscode.commands.registerCommand('localAgentic.testAST', async () => {
         // ... (Keep your existing AST test code here)
     });
 
-    // 5. Register the Semantic Diff Command
+    // 9. Register the Semantic Diff Command
     const showDiffCommand = vscode.commands.registerCommand('localAgentic.showProposedDiff', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
@@ -136,59 +118,62 @@ export function activate(context: vscode.ExtensionContext) {
         const originalUri = editor.document.uri;
         const virtualUri = AgenticDiffProvider.getVirtualUri(originalUri);
 
-        // MOCK AI RESPONSE: For testing, let's reverse the active file's text 
-        // to simulate the AI returning a "modified" version of the file.
         const originalText = editor.document.getText();
         const mockAiProposedText = "// -- AI PROPOSED REFACTOR --\n\n" + originalText.split('\n').reverse().join('\n');
 
-        // Update the virtual document with the AI's code
         diffProvider.updateContent(virtualUri, mockAiProposedText);
 
-        // Launch the native VS Code diff window
         await vscode.commands.executeCommand(
             'vscode.diff',
-            originalUri,                 // Left side (Current file)
-            virtualUri,                  // Right side (AI proposed file)
-            `AI Proposal: ${path.basename(originalUri.fsPath)}`, // Tab Title
-            { preview: true }            // Keep it as a preview tab
+            originalUri,                 
+            virtualUri,                  
+            `AI Proposal: ${path.basename(originalUri.fsPath)}`, 
+            { preview: true }            
         );
     });
 
-    context.subscriptions.push(testAstCommand, showDiffCommand, switchProfileCommand, disposable);
+    context.subscriptions.push(testAstCommand, showDiffCommand, disposableSettings);
 }
 
-// Helper to refresh the status bar text
+// Helper to refresh the status bar text directly from config.json
 function updateStatusBar() {
-    const config = vscode.workspace.getConfiguration('localAgentic');
-    const activeId = config.get<string>('activeProfile');
-    const profiles = config.get<any[]>('profiles') || [];
-    const activeProfile = profiles.find(p => p.id === activeId) || profiles[0];
+    try {
+        // 1. Set our fallback defaults
+        let profileName = 'home';
+        let model = 'llama3:8b';
+        let endpoint = 'http://127.0.0.1:11434/v1/chat/completions';
 
-    if (activeProfile) {
-        statusBarItem.text = `$(hubot) ${activeProfile.name}`;
-        statusBarItem.tooltip = `Model: ${activeProfile.model}\nEndpoint: ${activeProfile.endpointUrl}`;
+        // 2. Try to read from the JSON file if it exists
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders) {
+            const configPath = path.join(workspaceFolders[0].uri.fsPath, 'services', 'orchestrator', 'config.json');
+            
+            if (fs.existsSync(configPath)) {
+                const configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                profileName = configData.active_profile || profileName;
+                const profileSettings = configData.profiles?.[profileName];
+
+                if (profileSettings) {
+                    model = profileSettings.llm?.model_name || model;
+                    endpoint = profileSettings.llm?.endpoint_url || endpoint;
+                }
+            }
+        }
+
+        // 3. Format and unconditionally show the status bar item
+        const formattedName = profileName.charAt(0).toUpperCase() + profileName.slice(1);
+        statusBarItem.text = `$(hubot) ${formattedName}`;
+        statusBarItem.tooltip = `Model: ${model}\nEndpoint: ${endpoint}\nClick to open settings.`;
+        statusBarItem.show();
+
+    } catch (err) {
+        console.error('Failed to update status bar:', err);
     }
 }
 
-// Conceptual snippet
-// webviewPanel.webview.onDidReceiveMessage(async (message) => {
-//     if (message.command === 'updateSetting') {
-//         // 1. Format the JSON-RPC payload
-//         const payload = {
-//             jsonrpc: "2.0",
-//             method: "update_config",
-//             params: message.config,
-//             id: Date.now()
-//         };
-        
-//         // 2. Push down to the Python backend via /tmp/agent.sock
-//         udsClient.write(JSON.stringify(payload) + '\n');
-        
-//         vscode.window.showInformationMessage('Settings synced to local model!');
-//     }
-// });
-
 export function deactivate() {
-    // Graceful cleanup
     console.log('Deactivating Local Agentic Workspace.');
+    if (proxyServer) {
+        proxyServer.stop();
+    }
 }
