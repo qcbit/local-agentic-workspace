@@ -16,7 +16,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 1. Initialize and connect the IPC Client
     udsClient = new UdsClient();
-    udsClient.connect().catch(err => {
+    udsClient.connect().then(() => {
+        // Trigger background initial indexing on project load
+        indexWorkspaceOnLoad(udsClient);
+    }).catch(err => {
         vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
     });
 
@@ -29,6 +32,41 @@ export function activate(context: vscode.ExtensionContext) {
     } catch (error: any) {
         vscode.window.showErrorMessage(`Failed to start proxy server: ${error.message}`);
     }
+
+    // ... 
+    // 2. Start the Warp Proxy Server natively inside VS Code
+    try {
+        proxyServer = new WarpProxyServer();
+        proxyServer.start();
+        context.subscriptions.push({ dispose: () => proxyServer.stop() });
+        console.log('Warp Proxy Server started successfully.');
+    } catch (error: any) {
+        vscode.window.showErrorMessage(`Failed to start proxy server: ${error.message}`);
+    }
+
+    // 2.5 Listen for file saves and sync to LanceDB
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument(async (document) => {
+            // Only sync actual files (ignore output panels, settings, etc.)
+            if (document.uri.scheme !== 'file') return;
+            
+            // Optional: Ignore massive minified files or build directories
+            const filePath = document.uri.fsPath;
+            if (filePath.includes('node_modules') || filePath.includes('out') || filePath.includes('.git')) {
+                return;
+            }
+
+            try {
+                await udsClient.request('sync_file', {
+                    file_path: filePath,
+                    content: document.getText()
+                });
+                console.log(`🧠 Synced ${path.basename(filePath)} to LanceDB`);
+            } catch (error: any) {
+                console.error(`Failed to sync ${filePath} to vector store:`, error);
+            }
+        })
+    );
 
     // 3. Initialize the Status Bar (reads from config.json)
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -169,6 +207,30 @@ function updateStatusBar() {
     } catch (err) {
         console.error('Failed to update status bar:', err);
     }
+}
+
+async function indexWorkspaceOnLoad(udsClient: UdsClient) {
+    // Find all relevant source files, ignoring build/node_modules directories
+    const files = await vscode.workspace.findFiles(
+        '**/*.{ts,tsx,py,js,md,json}',
+        '**/{node_modules,out,dist,.git,.lancedb,.venv}/**'
+    );
+
+    console.log(`🚀 Starting initial workspace index: ${files.length} files found.`);
+
+    for (const fileUri of files) {
+        try {
+            const document = await vscode.workspace.openTextDocument(fileUri);
+            await udsClient.request('sync_file', {
+                file_path: fileUri.fsPath,
+                content: document.getText()
+            });
+        } catch (error) {
+            console.error(`Failed to index on load: ${fileUri.fsPath}`, error);
+        }
+    }
+
+    console.log('✅ Workspace initial indexing complete.');
 }
 
 export function deactivate() {
