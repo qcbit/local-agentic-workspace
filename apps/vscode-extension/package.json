@@ -58,19 +58,28 @@
     "commands": [
       {
         "command": "localAgenticWorkspace.showSettings",
-        "title": "Agentic Workspace: Open Settings"
+        "title": "Agentic Workspace: Open Settings",
+        "category": "Local Agentic"
       },
       {
         "command": "localAgentic.switchProfile",
-        "title": "LocalAgentic: Switch AI Profile"
+        "title": "LocalAgentic: Switch AI Profile",
+        "category": "Local Agentic"
       },
       {
         "command": "localAgentic.testAST",
-        "title": "LocalAgentic: testAST"
+        "title": "LocalAgentic: testAST",
+        "category": "Local Agentic"
       },
       {
         "command": "localAgentic.showProposedDiff",
-        "title": "LocalAgentic: Show Proposed Diff"
+        "title": "LocalAgentic: Show Proposed Diff",
+        "category": "Local Agentic"
+      },
+      {
+        "command": "localAgentic.searchCodebase",
+        "title": "Search Codebase",
+        "category": "Local Agentic"
       }
     ],
     "viewsContainers": {

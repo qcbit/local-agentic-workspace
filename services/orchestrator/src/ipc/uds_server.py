@@ -146,8 +146,9 @@ class JsonRpcUdsServer:
                 logger.info(f"⚙️ Orchestrator configuration updated. Active profile: {active_profile}")
                 return self._success_response(req_id, {"status": "config_updated"})
             elif method == "sync_file":
-                return self._handle_sync_file(params)
-
+                return self._success_response(req_id, self._handle_sync_file(params))
+            elif method == "search_codebase":
+                return self._success_response(req_id, self._handle_search_codebase(params))
             else:
                 return self._error_response(req_id, -32601, f"Method '{method}' not found")
                 
@@ -211,6 +212,36 @@ class JsonRpcUdsServer:
         
         async with server:
             await server.serve_forever()
+
+    def _handle_search_codebase(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        import time
+        query = params.get("query", "")
+        limit = params.get("limit", 5)
+
+        if not query:
+            raise ValueError("Query string is required for search.")
+
+        # Time the operation to verify sub-100ms latency
+        start_time = time.time()
+        raw_results = self.vector_store.semantic_search(query, limit=limit)
+        
+        # Strip the massive float vectors out before sending over IPC
+        clean_results = []
+        for r in raw_results:
+            clean_results.append({
+                "file_path": str(r.get("file_path")),
+                "content": str(r.get("content", "")),
+                "score": float(r.get("_distance", 0.0))
+            })
+            
+        elapsed_ms = (time.time() - start_time) * 1000
+        logger.info(f"🔍 Vector search completed in {elapsed_ms:.2f}ms")
+
+        return {
+            "status": "success",
+            "results": clean_results,
+            "elapsed_ms": round(elapsed_ms, 2)
+        }
 
 if __name__ == "__main__":
     server = JsonRpcUdsServer()

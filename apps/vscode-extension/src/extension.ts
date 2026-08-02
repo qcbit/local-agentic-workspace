@@ -23,6 +23,10 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
     });
 
+    // Create a dedicated Output Channel for our search results
+    const searchOutputChannel = vscode.window.createOutputChannel('Local Agentic Search');
+    context.subscriptions.push(searchOutputChannel);
+
     // 2. Start the Warp Proxy Server natively inside VS Code
     try {
         proxyServer = new WarpProxyServer();
@@ -121,6 +125,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
         });
     });
+    context.subscriptions.push(disposableSettings);
 
     // 5. Register the Chat Sidebar Provider
     const chatProvider = new ChatViewProvider(context.extensionUri, udsClient);
@@ -144,6 +149,7 @@ export function activate(context: vscode.ExtensionContext) {
     const testAstCommand = vscode.commands.registerCommand('localAgentic.testAST', async () => {
         // ... (Keep your existing AST test code here)
     });
+    context.subscriptions.push(testAstCommand)
 
     // 9. Register the Semantic Diff Command
     const showDiffCommand = vscode.commands.registerCommand('localAgentic.showProposedDiff', async () => {
@@ -169,8 +175,37 @@ export function activate(context: vscode.ExtensionContext) {
             { preview: true }            
         );
     });
+    context.subscriptions.push(showDiffCommand);
 
-    context.subscriptions.push(testAstCommand, showDiffCommand, disposableSettings);
+    // Register a command to test Semantic Search latency
+    // DIAGNOSTIC COMMAND
+    const testSearchCommand = vscode.commands.registerCommand('localAgentic.searchCodebase', async () => {
+        const query = await vscode.window.showInputBox({
+            prompt: 'Enter a semantic query to search your codebase'
+        });
+
+        if (!query) return;
+
+        // Force open the panel immediately so we can see the steps happen in real-time
+        searchOutputChannel.clear();
+        searchOutputChannel.show(true);
+        searchOutputChannel.appendLine(`[DIAGNOSTIC] 1. Query captured: "${query}"`);
+        searchOutputChannel.appendLine(`[DIAGNOSTIC] 2. Awaiting IPC response from Python...`);
+
+        try {
+            const response = await udsClient.request('search_codebase', { query: query, limit: 3 });
+            
+            searchOutputChannel.appendLine(`[DIAGNOSTIC] 3. Promise resolved!`);
+            searchOutputChannel.appendLine(`RAW RESPONSE DUMP:`);
+            searchOutputChannel.appendLine(JSON.stringify(response, null, 2));
+
+        } catch (error: any) {
+            searchOutputChannel.appendLine(`[DIAGNOSTIC] 3. ERROR CAUGHT!`);
+            searchOutputChannel.appendLine(error.message);
+            searchOutputChannel.appendLine(error.stack || "No stack trace");
+        }
+    });
+    context.subscriptions.push(testSearchCommand);
 }
 
 // Helper to refresh the status bar text directly from config.json
