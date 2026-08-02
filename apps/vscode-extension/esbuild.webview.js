@@ -1,9 +1,12 @@
 const esbuild = require('esbuild');
 
 esbuild.build({
-    entryPoints: ['src/webview/index.tsx'],
+    entryPoints: {
+        'webview': 'src/webview/index.tsx', // The Settings panel output (webview.js)
+        'chat': 'src/webview/chat.tsx'      // The Chat panel output (chat.js)
+    },
     bundle: true,
-    outfile: 'out/webview.js',
+    outdir: 'out',
     format: 'iife',     // Immediately Invoked Function Expression for browser
     minify: true,
     sourcemap: true,

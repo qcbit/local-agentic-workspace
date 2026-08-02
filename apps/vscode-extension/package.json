@@ -79,6 +79,11 @@
           "id": "localAgenticContainer",
           "title": "Local Agent",
           "icon": "resources/icon.svg"
+        },
+        {
+          "id": "agentic-workspace-sidebar",
+          "title": "Agentic Workspace",
+          "icon": "$(hubot)"
         }
       ]
     },
@@ -90,6 +95,12 @@
           "name": "Agent Chat & State",
           "icon": "resources/icon.svg",
           "contextualTitle": "Local Agentic Assistant"
+        },
+        {
+          "type": "webview",
+          "id": "localAgenticWorkspace.chatView",
+          "icon": "resources/icon.svg",
+          "name": "Chat"
         }
       ]
     }

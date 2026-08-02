@@ -1,5 +1,4 @@
 import * as net from 'net';
-import * as path from 'path';
 
 export class UdsClient {
     private client: net.Socket | null = null;
@@ -9,8 +8,8 @@ export class UdsClient {
     private socketPath: string;
 
     constructor() {
-        // Resolve the path to the project root (assuming we run this from the root dir)
-        this.socketPath = path.resolve(process.cwd(), '.agent.sock');
+        // Universally accessible location that both Node and Python can reach
+        this.socketPath = '/tmp/agent.sock';
     }
 
     /**
