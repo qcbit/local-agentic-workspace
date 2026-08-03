@@ -6,6 +6,7 @@ import os
 import socket
 import stat
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -46,6 +47,11 @@ class JsonRpcUdsServer:
         logger.info("Initializing LanceDB Vector Store...")
         self.vector_store = LocalVectorStore()
 
+        # A dictionary to track pending reverse-requests (Requests sent to Node.js)
+        self.pending_requests = {}
+        # We need a reference to the active writer to push the message
+        self.active_writer = None
+
     def _load_config(self) -> Dict[str, Any]:
         """Loads the orchestrator configuration from disk."""
         config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
@@ -58,6 +64,7 @@ class JsonRpcUdsServer:
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Reads incoming streams, dispatches JSON-RPC requests, and writes responses."""
+        self.active_writer = writer
         try:
             while True:
                 data = await reader.readline()
@@ -68,16 +75,71 @@ class JsonRpcUdsServer:
                 if not payload:
                     continue
                     
-                response = await self.process_request(payload)
+                req = json.loads(payload)
                 
-                writer.write((json.dumps(response) + '\n').encode('utf-8'))
-                await writer.drain()
+                # Check if this is a RESPONSE to a reverse-request we sent
+                if "result" in req and req.get("id") in self.pending_requests:
+                    future = self.pending_requests.pop(req["id"])
+                    if not future.done():
+                        future.set_result(req["result"])
+                    continue
+                
+                # Handle error responses from Node.js
+                if "error" in req and req.get("id") in self.pending_requests:
+                    future = self.pending_requests.pop(req["id"])
+                    if not future.done():
+                        # Pass the error string back to the agent so it knows what failed
+                        future.set_result({"content": f"VS Code Context Error: {req['error']}"})
+                    continue
+                    
+                # CONCURRENCY FIX: Process standard requests in a background task!
+                # This frees up the loop to immediately read the next line.
+                asyncio.create_task(self._dispatch_request(payload, writer))
                 
         except Exception as e:
             logger.error(f"Client connection error: {e}")
         finally:
+            self.active_writer = None
             writer.close()
             await writer.wait_closed()
+
+    async def _dispatch_request(self, payload: str, writer: asyncio.StreamWriter):
+        """Processes the request in the background and writes the response."""
+        try:
+            response = await self.process_request(payload)
+            writer.write((json.dumps(response) + '\n').encode('utf-8'))
+            await writer.drain()
+        except Exception as e:
+            logger.error(f"Error dispatching request: {e}")
+
+    async def request_client_context(self, method: str) -> dict:
+        """Sends a JSON-RPC request to VS Code and awaits the response."""
+        if not self.active_writer:
+            raise ConnectionError("No active VS Code client connected.")
+            
+        req_id = str(uuid.uuid4())
+        payload = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+            "params": {}
+        }
+        
+        # Create a Future object to suspend execution until Node.js replies
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self.pending_requests[req_id] = future
+        
+        # Fire it over the socket
+        self.active_writer.write((json.dumps(payload) + '\n').encode('utf-8'))
+        await self.active_writer.drain()
+        
+        # Wait here until the response handler (above) sets the result
+        try:
+            return await asyncio.wait_for(future, timeout=5.0)
+        except asyncio.TimeoutError:
+            self.pending_requests.pop(req_id, None)
+            return {"content": "Error: VS Code client timed out."}
 
     async def process_request(self, payload: str) -> Dict[str, Any]:
         """Validates and routes the JSON-RPC 2.0 payload."""
@@ -104,7 +166,7 @@ class JsonRpcUdsServer:
                 
                 try:
                     # Offload the blocking agent loop to a worker thread
-                    result_state = await asyncio.to_thread(self._run_agent_sync, goal)
+                    result_state = await self._run_agent_async(goal)
                     
                     # Extract final observation
                     final_observation = "Task failed or max iterations reached."
@@ -174,7 +236,7 @@ class JsonRpcUdsServer:
 
         return {"status": "success", "indexed_path": file_path}
 
-    def _run_agent_sync(self, goal: str):
+    async def _run_agent_async(self, goal: str):
         """Synchronous wrapper to instantiate and run the agent."""
         
         # 1. Determine which profile is active
@@ -185,14 +247,22 @@ class JsonRpcUdsServer:
         # 2. Extract LLM settings for this specific environment
         llm_config = active_config.get("llm", {})
         
+        # Strictly pull from config.json (Ensure your JSON keys match these exactly)
+        endpoint = llm_config.get("endpoint_url")
+        model_name = llm_config.get("model_name") 
+        
+        if not endpoint or not model_name:
+            raise ValueError(f"Missing 'endpoint_url' or 'model_name' in config.json for profile '{active_profile_name}'")
+        
         llm = OllamaProxyProvider(
-            endpoint_url=llm_config.get("endpoint_url", "http://127.0.0.1:11435/v1/chat/completions"),
-            model=llm_config.get("model_name", "llama3:8b")
+            endpoint_url=endpoint,
+            model=model_name
         )
         
-        # Pass the environment-specific config down to the Agent
-        agent = Agent(llm_provider=llm, config=active_config)
-        return agent.run(goal)
+        # Pass uds_server=self so the ToolRegistry can execute context tools!
+        agent = Agent(llm_provider=llm, config=active_config, uds_server=self)
+        state = await agent.run(goal)
+        return state
 
     def _success_response(self, req_id: Any, result: Any) -> Dict[str, Any]:
         return {"jsonrpc": "2.0", "result": result, "id": req_id}

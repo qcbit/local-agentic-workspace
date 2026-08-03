@@ -1,4 +1,5 @@
 import * as net from 'net';
+import * as vscode from 'vscode';
 
 export class UdsClient {
     private client: net.Socket | null = null;
@@ -45,6 +46,10 @@ export class UdsClient {
      * Processes the incoming data stream, splitting by newline to handle 
      * complete JSON-RPC payloads as they arrive.
      */
+    /**
+     * Processes the incoming data stream, splitting by newline to handle 
+     * complete JSON-RPC payloads as they arrive.
+     */
     private processBuffer() {
         let newlineIndex;
         while ((newlineIndex = this.buffer.indexOf('\n')) !== -1) {
@@ -52,22 +57,64 @@ export class UdsClient {
             this.buffer = this.buffer.slice(newlineIndex + 1);
             
             try {
-                const response = JSON.parse(message);
+                const msg = JSON.parse(message);
                 
-                // Match the response ID to the pending request Promise
-                if (response.id !== undefined && this.pendingRequests.has(response.id)) {
-                    const { resolve, reject } = this.pendingRequests.get(response.id)!;
+                // 1. REVERSE-REQUEST LOGIC: Is Python asking Node.js for data?
+                if (msg.method) {
+                    let resultContent = "";
+                    try {
+                        const activeEditor = vscode.window.activeTextEditor;
+                        
+                        if (msg.method === "get_active_file_content") {
+                            if (activeEditor) {
+                                resultContent = activeEditor.document.getText();
+                            } else {
+                                resultContent = "No active editor window found.";
+                            }
+                        } else if (msg.method === "get_selected_text") {
+                            if (activeEditor && !activeEditor.selection.isEmpty) {
+                                resultContent = activeEditor.document.getText(activeEditor.selection);
+                            } else {
+                                resultContent = "No text selected.";
+                            }
+                        }
+
+                        // Send the result back to Python using Python's exact ID
+                        if (this.client) {
+                            const response = {
+                                jsonrpc: "2.0",
+                                id: msg.id, 
+                                result: { content: resultContent }
+                            };
+                            this.client.write(JSON.stringify(response) + '\n');
+                        }
+                    } catch (error: any) {
+                        if (this.client) {
+                            const errorResponse = {
+                                jsonrpc: "2.0",
+                                id: msg.id,
+                                error: { code: -32000, message: error.message }
+                            };
+                            this.client.write(JSON.stringify(errorResponse) + '\n');
+                        }
+                    }
+                    continue; // Skip the rest of the loop, we handled the request
+                }
+
+                // 2. EXISTING LOGIC: Handle standard responses to our Node.js requests
+                if (msg.id !== undefined && this.pendingRequests.has(msg.id)) {
+                    const { resolve, reject } = this.pendingRequests.get(msg.id)!;
                     
-                    if (response.error) {
-                        reject(response.error);
+                    if (msg.error) {
+                        reject(msg.error);
                     } else {
-                        resolve(response.result);
+                        resolve(msg.result);
                     }
                     
-                    this.pendingRequests.delete(response.id);
+                    this.pendingRequests.delete(msg.id);
                 }
             } catch (e) {
-                console.error('Failed to parse JSON-RPC response:', e);
+                console.error('Failed to parse JSON-RPC message:', e);
             }
         }
     }
