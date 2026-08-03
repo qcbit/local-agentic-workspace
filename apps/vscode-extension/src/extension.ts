@@ -178,7 +178,6 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(showDiffCommand);
 
     // Register a command to test Semantic Search latency
-    // DIAGNOSTIC COMMAND
     const testSearchCommand = vscode.commands.registerCommand('localAgentic.searchCodebase', async () => {
         const query = await vscode.window.showInputBox({
             prompt: 'Enter a semantic query to search your codebase'
@@ -186,23 +185,26 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (!query) return;
 
-        // Force open the panel immediately so we can see the steps happen in real-time
-        searchOutputChannel.clear();
-        searchOutputChannel.show(true);
-        searchOutputChannel.appendLine(`[DIAGNOSTIC] 1. Query captured: "${query}"`);
-        searchOutputChannel.appendLine(`[DIAGNOSTIC] 2. Awaiting IPC response from Python...`);
-
         try {
             const response = await udsClient.request('search_codebase', { query: query, limit: 3 });
             
-            searchOutputChannel.appendLine(`[DIAGNOSTIC] 3. Promise resolved!`);
-            searchOutputChannel.appendLine(`RAW RESPONSE DUMP:`);
-            searchOutputChannel.appendLine(JSON.stringify(response, null, 2));
+            searchOutputChannel.clear();
+            searchOutputChannel.show(true); 
+            
+            searchOutputChannel.appendLine(`=========================================`);
+            searchOutputChannel.appendLine(`🔍 Search Results for: "${query}"`);
+            searchOutputChannel.appendLine(`⏱️  Round-trip time: ${response.elapsed_ms}ms`);
+            searchOutputChannel.appendLine(`=========================================\n`);
+            
+            response.results.forEach((res: any, index: number) => {
+                searchOutputChannel.appendLine(`[Result ${index + 1}] Distance: ${res.score.toFixed(3)}`);
+                searchOutputChannel.appendLine(`File: ${res.file_path}\n`);
+                searchOutputChannel.appendLine(res.content);
+                searchOutputChannel.appendLine(`\n-----------------------------------------\n`);
+            });
 
         } catch (error: any) {
-            searchOutputChannel.appendLine(`[DIAGNOSTIC] 3. ERROR CAUGHT!`);
-            searchOutputChannel.appendLine(error.message);
-            searchOutputChannel.appendLine(error.stack || "No stack trace");
+            vscode.window.showErrorMessage(`Search failed: ${error.message}`);
         }
     });
     context.subscriptions.push(testSearchCommand);

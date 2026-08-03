@@ -9,6 +9,7 @@ import os
 import subprocess
 import time
 
+from rag.vector_store import LocalVectorStore
 from services.orchestrator.src.memory.context_manager import SlidingContextManager
 
 logger = logging.getLogger(__name__)
