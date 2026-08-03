@@ -97,6 +97,85 @@ class ToolDispatcher:
         output = result.stdout if result.returncode == 0 else result.stderr
         return f"Command exit code {result.returncode}.\nOutput:\n{output}"
 
+# --- Tool Registry ---
+
+class ToolRegistry:
+    def __init__(self, uds_server=None):
+        # We pass in a reference to the UDS Server so the ToolRegistry can
+        # trigger the reverse-request over the socket to VS Code.
+        self.uds_server = uds_server
+        self.vector_store = LocalVectorStore() 
+        
+        self.tools = {
+            # ... keep your existing math tool ...
+            "search_codebase": {
+                "name": "search_codebase",
+                "description": "Searches the local codebase using semantic vector embeddings. Use this when you need to find where a function, class, or variable is defined, or to understand how a specific part of the local project works.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The semantic search query"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            "get_active_file_content": {
+                "name": "get_active_file_content",
+                "description": "Retrieves the full source code text currently visible in the user's active VS Code editor window.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            "get_selected_text": {
+                "name": "get_selected_text",
+                "description": "Retrieves the specific string of text the user currently has highlighted/selected in VS Code.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        }
+
+    async def execute_tool_async(self, tool_name: str, arguments: dict) -> Optional[str]:
+        try:
+            if tool_name == "calculate_math":
+                # ... existing logic ...
+                pass
+                
+            elif tool_name == "search_codebase":
+                query = arguments.get("query")
+                if not isinstance(query, str) or not query.strip():
+                    return "Error: search query must be a non-empty string."
+
+                results = self.vector_store.semantic_search(query, limit=3)
+                if not results:
+                    return "No relevant codebase results found."
+                
+                formatted_response = "Codebase Search Results:\n\n"
+                for i, res in enumerate(results):
+                    formatted_response += f"--- Result {i+1} (File: {res.get('file_path')}) ---\n"
+                    formatted_response += f"{res.get('content')}\n\n"
+                return formatted_response
+
+            elif tool_name in ["get_active_file_content", "get_selected_text"]:
+                if not self.uds_server:
+                    return "Error: IPC Server not attached to ToolRegistry."
+                
+                # This is where the magic happens! We pause the agent and 
+                # ask the UDS server to request data FROM Node.js
+                response = await self.uds_server.request_client_context(tool_name)
+                return response.get("content", "Error: No content received from VS Code.")
+
+            else:
+                return f"Tool {tool_name} not found."
+                
+        except Exception as e:
+            return f"Error executing {tool_name}: {str(e)}"
+
 # --- Agent Core ---
 
 class Agent:
