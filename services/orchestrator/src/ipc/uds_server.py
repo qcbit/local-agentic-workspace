@@ -1,18 +1,29 @@
 import asyncio
+import hashlib
 import json
-import os
-import stat
 import logging
+import os
+import socket
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.abspath(os.path.join(script_dir, ".."))                             # .../services/orchestrator/src
+workspace_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
+
+for path in (src_dir, workspace_root):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from rag.vector_store import LocalVectorStore
+from services.orchestrator.src.agent.agent_loop import Agent, OllamaProxyProvider
 
 # Dynamically resolve the project root to ensure imports work from any execution path
 project_root = str(Path(__file__).resolve().parent.parent.parent.parent.parent)
 if project_root not in sys.path:
     sys.path.append(project_root)
-
-from services.orchestrator.src.agent.agent_loop import Agent, OllamaProxyProvider
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -28,6 +39,12 @@ class JsonRpcUdsServer:
             self.socket_path = socket_path
             
         self.config = self._load_config()
+
+        self.running = False
+        
+        # Initialize the vector store on startup
+        logger.info("Initializing LanceDB Vector Store...")
+        self.vector_store = LocalVectorStore()
 
     def _load_config(self) -> Dict[str, Any]:
         """Loads the orchestrator configuration from disk."""
@@ -128,6 +145,10 @@ class JsonRpcUdsServer:
                     
                 logger.info(f"⚙️ Orchestrator configuration updated. Active profile: {active_profile}")
                 return self._success_response(req_id, {"status": "config_updated"})
+            elif method == "sync_file":
+                return self._success_response(req_id, self._handle_sync_file(params))
+            elif method == "search_codebase":
+                return self._success_response(req_id, self._handle_search_codebase(params))
             else:
                 return self._error_response(req_id, -32601, f"Method '{method}' not found")
                 
@@ -136,6 +157,22 @@ class JsonRpcUdsServer:
         except Exception as e:
             logger.error(f"Internal error processing request: {e}")
             return self._error_response(req.get("id") if isinstance(req, dict) else None, -32603, str(e))
+
+    def _handle_sync_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Hashes the incoming file and upserts it into LanceDB."""
+        file_path = params.get("file_path")
+        content = params.get("content", "")
+
+        if not file_path:
+            raise ValueError("file_path is required for sync_file")
+
+        # Generate a hash to track file modifications
+        file_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+
+        # Run the upsert (this parses the AST and generates vectors)
+        self.vector_store.upsert_file(file_path, file_hash, content)
+
+        return {"status": "success", "indexed_path": file_path}
 
     def _run_agent_sync(self, goal: str):
         """Synchronous wrapper to instantiate and run the agent."""
@@ -175,6 +212,36 @@ class JsonRpcUdsServer:
         
         async with server:
             await server.serve_forever()
+
+    def _handle_search_codebase(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        import time
+        query = params.get("query", "")
+        limit = params.get("limit", 5)
+
+        if not query:
+            raise ValueError("Query string is required for search.")
+
+        # Time the operation to verify sub-100ms latency
+        start_time = time.time()
+        raw_results = self.vector_store.semantic_search(query, limit=limit)
+        
+        # Strip the massive float vectors out before sending over IPC
+        clean_results = []
+        for r in raw_results:
+            clean_results.append({
+                "file_path": str(r.get("file_path")),
+                "content": str(r.get("content", "")),
+                "score": float(r.get("_distance", 0.0))
+            })
+            
+        elapsed_ms = (time.time() - start_time) * 1000
+        logger.info(f"🔍 Vector search completed in {elapsed_ms:.2f}ms")
+
+        return {
+            "status": "success",
+            "results": clean_results,
+            "elapsed_ms": round(elapsed_ms, 2)
+        }
 
 if __name__ == "__main__":
     server = JsonRpcUdsServer()

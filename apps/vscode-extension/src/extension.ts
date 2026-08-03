@@ -16,9 +16,16 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 1. Initialize and connect the IPC Client
     udsClient = new UdsClient();
-    udsClient.connect().catch(err => {
+    udsClient.connect().then(() => {
+        // Trigger background initial indexing on project load
+        indexWorkspaceOnLoad(udsClient);
+    }).catch(err => {
         vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
     });
+
+    // Create a dedicated Output Channel for our search results
+    const searchOutputChannel = vscode.window.createOutputChannel('Local Agentic Search');
+    context.subscriptions.push(searchOutputChannel);
 
     // 2. Start the Warp Proxy Server natively inside VS Code
     try {
@@ -29,6 +36,41 @@ export function activate(context: vscode.ExtensionContext) {
     } catch (error: any) {
         vscode.window.showErrorMessage(`Failed to start proxy server: ${error.message}`);
     }
+
+    // ... 
+    // 2. Start the Warp Proxy Server natively inside VS Code
+    try {
+        proxyServer = new WarpProxyServer();
+        proxyServer.start();
+        context.subscriptions.push({ dispose: () => proxyServer.stop() });
+        console.log('Warp Proxy Server started successfully.');
+    } catch (error: any) {
+        vscode.window.showErrorMessage(`Failed to start proxy server: ${error.message}`);
+    }
+
+    // 2.5 Listen for file saves and sync to LanceDB
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument(async (document) => {
+            // Only sync actual files (ignore output panels, settings, etc.)
+            if (document.uri.scheme !== 'file') return;
+            
+            // Optional: Ignore massive minified files or build directories
+            const filePath = document.uri.fsPath;
+            if (filePath.includes('node_modules') || filePath.includes('out') || filePath.includes('.git')) {
+                return;
+            }
+
+            try {
+                await udsClient.request('sync_file', {
+                    file_path: filePath,
+                    content: document.getText()
+                });
+                console.log(`🧠 Synced ${path.basename(filePath)} to LanceDB`);
+            } catch (error: any) {
+                console.error(`Failed to sync ${filePath} to vector store:`, error);
+            }
+        })
+    );
 
     // 3. Initialize the Status Bar (reads from config.json)
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -83,6 +125,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
         });
     });
+    context.subscriptions.push(disposableSettings);
 
     // 5. Register the Chat Sidebar Provider
     const chatProvider = new ChatViewProvider(context.extensionUri, udsClient);
@@ -106,6 +149,7 @@ export function activate(context: vscode.ExtensionContext) {
     const testAstCommand = vscode.commands.registerCommand('localAgentic.testAST', async () => {
         // ... (Keep your existing AST test code here)
     });
+    context.subscriptions.push(testAstCommand)
 
     // 9. Register the Semantic Diff Command
     const showDiffCommand = vscode.commands.registerCommand('localAgentic.showProposedDiff', async () => {
@@ -131,8 +175,39 @@ export function activate(context: vscode.ExtensionContext) {
             { preview: true }            
         );
     });
+    context.subscriptions.push(showDiffCommand);
 
-    context.subscriptions.push(testAstCommand, showDiffCommand, disposableSettings);
+    // Register a command to test Semantic Search latency
+    const testSearchCommand = vscode.commands.registerCommand('localAgentic.searchCodebase', async () => {
+        const query = await vscode.window.showInputBox({
+            prompt: 'Enter a semantic query to search your codebase'
+        });
+
+        if (!query) return;
+
+        try {
+            const response = await udsClient.request('search_codebase', { query: query, limit: 3 });
+            
+            searchOutputChannel.clear();
+            searchOutputChannel.show(true); 
+            
+            searchOutputChannel.appendLine(`=========================================`);
+            searchOutputChannel.appendLine(`🔍 Search Results for: "${query}"`);
+            searchOutputChannel.appendLine(`⏱️  Round-trip time: ${response.elapsed_ms}ms`);
+            searchOutputChannel.appendLine(`=========================================\n`);
+            
+            response.results.forEach((res: any, index: number) => {
+                searchOutputChannel.appendLine(`[Result ${index + 1}] Distance: ${res.score.toFixed(3)}`);
+                searchOutputChannel.appendLine(`File: ${res.file_path}\n`);
+                searchOutputChannel.appendLine(res.content);
+                searchOutputChannel.appendLine(`\n-----------------------------------------\n`);
+            });
+
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Search failed: ${error.message}`);
+        }
+    });
+    context.subscriptions.push(testSearchCommand);
 }
 
 // Helper to refresh the status bar text directly from config.json
@@ -169,6 +244,30 @@ function updateStatusBar() {
     } catch (err) {
         console.error('Failed to update status bar:', err);
     }
+}
+
+async function indexWorkspaceOnLoad(udsClient: UdsClient) {
+    // Find all relevant source files, ignoring build/node_modules directories
+    const files = await vscode.workspace.findFiles(
+        '**/*.{ts,tsx,py,js,md,json}',
+        '**/{node_modules,out,dist,.git,.lancedb,.venv}/**'
+    );
+
+    console.log(`🚀 Starting initial workspace index: ${files.length} files found.`);
+
+    for (const fileUri of files) {
+        try {
+            const document = await vscode.workspace.openTextDocument(fileUri);
+            await udsClient.request('sync_file', {
+                file_path: fileUri.fsPath,
+                content: document.getText()
+            });
+        } catch (error) {
+            console.error(`Failed to index on load: ${fileUri.fsPath}`, error);
+        }
+    }
+
+    console.log('✅ Workspace initial indexing complete.');
 }
 
 export function deactivate() {

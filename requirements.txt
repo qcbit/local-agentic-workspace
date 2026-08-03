@@ -1,0 +1,7 @@
+lancedb
+pyarrow
+requests
+tree-sitter
+tree-sitter-python
+tree-sitter-typescript
+fastembed
