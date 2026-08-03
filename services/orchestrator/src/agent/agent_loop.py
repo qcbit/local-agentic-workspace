@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from enum import Enum
@@ -178,15 +179,19 @@ class ToolRegistry:
 
 # --- Agent Core ---
 
+# --- Agent Core ---
+
 class Agent:
     """The central state machine managing the ReAct loop."""
 
-    def __init__(self, llm_provider, config: Dict[str, Any]):
+    def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None):
         self.llm_provider = llm_provider
         self.dispatcher = ToolDispatcher()
+        
+        # 1. Initialize the ToolRegistry so it exists on the Agent!
+        self.tool_registry = ToolRegistry(uds_server=uds_server)
         self.max_iterations = 10
         
-        # Initialize memory with the loaded config
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
         
@@ -196,40 +201,8 @@ class Agent:
             llm_provider=self.llm_provider,
         )
 
-    def context_assembly(self, state: AgentState) -> List[Dict[str, str]]:
-        """Assembles the user goal and historical state into the LLM context window."""
-        system_prompt = (
-            "You are an autonomous agent. You must respond ONLY with valid JSON. "
-            "Do not include any conversational text or markdown formatting. "
-            "You have access to the following tools:\n"
-            "1. 'terminal_proxy' - args: {\"command\": \"<bash command>\"}\n"
-            "2. 'file_system' - args: {\"action\": \"<read/write>\", \"path\": \"<file path>\"}\n"
-            "3. 'finish_task' - args: {\"summary\": \"<summary of results>\"}\n\n"
-            "Your output must be a single JSON object with EXACTLY these keys: "
-            "\"reasoning\" (string), \"tool\" (string), and \"tool_args\" (dictionary). "
-            "When you have achieved the user's goal based on the observations, you MUST call 'finish_task'."
-        )
-        
-        context = [
-            {"role": Role.SYSTEM.value, "content": system_prompt},
-            {"role": Role.USER.value, "content": state.user_goal}
-        ]
-        
-        for msg in state.history:
-            if msg.role == Role.TOOL:
-                # Map tool observations to the USER role to maintain strict conversation flow
-                context.append({
-                    "role": Role.USER.value, 
-                    "content": f"Tool '{msg.name}' Observation:\n{msg.content}\n\nWhat is your next action?"
-                })
-            else:
-                context.append({"role": msg.role.value, "content": msg.content})
-                
-        return context
-
     def reason(self, context: List[Dict[str, str]]) -> Dict[str, Any]:
         """Invokes the LLM and parses the structured JSON response."""
-        # Delegate to the LLM (Ollama, OpenAI, Claude, etc.)
         raw_response = self.llm_provider.generate(context)
         print(f"🧠 [Reasoning] LLM Output:\n{raw_response}")
         
@@ -242,7 +215,8 @@ class Agent:
                 "tool_args": {"raw": raw_response}
             }
 
-    def run(self, user_goal: str) -> AgentState:
+    # 2. Make the run method ASYNC so we can await the IPC socket tools
+    async def run(self, user_goal: str) -> AgentState:
         """The Main Agent Loop: Context -> Reason -> Tool -> Observation -> State Update."""
         state = AgentState(user_goal=user_goal)
         print(f"🚀 --- Starting Agent Loop ---\nGoal: {user_goal}")
@@ -250,53 +224,62 @@ class Agent:
         while not state.is_complete and state.iterations < state.max_iterations:
             print(f"\n🔄 --- Iteration {state.iterations + 1} ---")
             
-            # 1. Assemble Context using the new manager
-            system_prompt = (
-                "You are an autonomous agent. You must respond ONLY with valid JSON. "
-                "Do not include any conversational text or markdown formatting. "
-                "You have access to the following tools:\n"
-                "1. 'terminal_proxy' - args: {\"command\": \"<bash command>\"}\n"
-                "2. 'file_system' - args: {\"action\": \"<read/write>\", \"path\": \"<file path>\"}\n"
-                "3. 'finish_task' - args: {\"summary\": \"<summary of results>\"}\n\n"
-                "Your output must be a single JSON object with EXACTLY these keys: "
-                "\"reasoning\" (string), \"tool\" (string), and \"tool_args\" (dictionary). "
-                "When you have achieved the user's goal based on the observations, you MUST call 'finish_task'."
-            )
+            # Fetch dynamically from our properly named tool_registry
+            tool_descriptions = "\n".join([f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()])
+
+            # 3. Use an f-string so {tool_descriptions} actually gets injected!
+            # Note the double brackets {{ }} to escape JSON schema syntax inside an f-string.
+            system_prompt = f"""You are an autonomous agent. You must respond ONLY with valid JSON. 
+
+            Do not include any conversational text or markdown formatting. 
+            You have access to the following tools:
+            1. 'terminal_proxy' - args: {{"command": "<bash command>"}}
+            2. 'file_system' - args: {{"action": "<read/write>", "path": "<file path>"}}
+            3. 'finish_task' - args: {{"summary": "<summary of results>"}}
+
+            AVAILABLE CONTEXT TOOLS:
+            {tool_descriptions}
+
+            Your output must be a single JSON object with EXACTLY these keys: "reasoning" (string), "tool" (string), and "tool_args" (dictionary). 
+            When you have achieved the user's goal based on the observations, you MUST call 'finish_task'.
+
+            CRITICAL INSTRUCTIONS FOR VS CODE CONTEXT:
+            - You are running inside VS Code. You DO NOT know what file the user is looking at by default.
+            - If the user asks about "this file", "my code", or "the current file", you are strictly FORBIDDEN from using the `terminal_proxy` or `file_system` tools to guess the file path.
+            - You MUST use the `get_active_file_content` tool to read the file. 
+            - You MUST use the `get_selected_text` tool to read highlighted code.
+            """
             
             context = self.memory.build_safe_context(state, system_prompt)
-            
-            # 2. Reasoning
             llm_response = self.reason(context)
             
-            # 3. State Update (Assistant Thought)
             state.history.append(Message(role=Role.ASSISTANT, content=json.dumps(llm_response)))
 
-            # Provide a fallback string if the key is missing
             tool_name = llm_response.get("tool", "unknown")
             tool_args = llm_response.get("tool_args", {})
 
-            # Handle task completion
             if tool_name == "finish_task":
                 state.is_complete = True
-                # Extract the LLM's custom summary, fallback to a default string if missing
                 summary = tool_args.get("summary", "Task completed successfully.")
                 print(f"✅ [Observation] {summary}")
-                
-                # Append the final tool observation to the history BEFORE breaking
                 state.history.append(Message(role=Role.TOOL, content=summary, name=tool_name))
                 break
 
-            # 4. Tool Call & Observation
-            observation = self.dispatcher.execute(tool_name, tool_args)
+            # 4. Route the tool call to the correct handler
+            if tool_name in self.tool_registry.tools:
+                # Execute new async tools (search_codebase, get_active_file_content)
+                observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
+            else:
+                # Execute original synchronous tools (terminal_proxy, file_system)
+                observation = self.dispatcher.execute(tool_name, tool_args)
+                
             print(f"👀 [Observation] {observation}")
             
-            # --- Add Circuit Breaker Here ---
             if tool_name == "error" and "Connection Error" in str(llm_response.get("reasoning", "")):
                 print("🛑 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
                 break
 
-            # 5. State Update (Tool Result)
-            state.history.append(Message(role=Role.TOOL, content=observation, name=tool_name))
+            state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name))
             state.iterations += 1
 
         if not state.is_complete:
@@ -378,12 +361,10 @@ class MockLLMProvider:
 #     final_state = agent.run("Locate the project root and read the configuration file.")
 
 if __name__ == "__main__":
-    # Initialize the live proxy provider
-    # It defaults to http://127.0.0.1:11435/v1/chat/completions and llama3:8b
     llm = OllamaProxyProvider()
     
-    # Pass the live provider to the agent
-    agent = Agent(llm_provider=llm)
+    # We pass an empty config for the test run
+    agent = Agent(llm_provider=llm, config={})
     
-    # Run the loop with a test goal
-    final_state = agent.run("List the files in my current directory.")
+    # Use asyncio.run() to execute the new async loop
+    final_state = asyncio.run(agent.run("What is the name of the function defined in my current file?"))
