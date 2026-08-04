@@ -42,6 +42,9 @@ class JsonRpcUdsServer:
         self.config = self._load_config()
 
         self.running = False
+
+        # Registry for spontaneous events from VS Code
+        self.notification_handlers = {}
         
         # Initialize the vector store on startup
         logger.info("Initializing LanceDB Vector Store...")
@@ -51,6 +54,10 @@ class JsonRpcUdsServer:
         self.pending_requests = {}
         # We need a reference to the active writer to push the message
         self.active_writer = None
+
+    def register_notification_handler(self, method_name: str, callback_coroutine):
+        """Registers an async callback for a specific incoming notification."""
+        self.notification_handlers[method_name] = callback_coroutine
 
     def _load_config(self) -> Dict[str, Any]:
         """Loads the orchestrator configuration from disk."""
@@ -70,12 +77,27 @@ class JsonRpcUdsServer:
                 data = await reader.readline()
                 if not data:
                     break
+
+                print(f"🕵️ [RAW SOCKET] {data.decode('utf-8').strip()}")
                 
                 payload = data.decode('utf-8').strip()
                 if not payload:
                     continue
                     
                 req = json.loads(payload)
+
+                # Is this an unprompted notification from VS Code? (Has method, no ID)
+                if "method" in req and "id" not in req:
+                    method = req["method"]
+                    params = req.get("params", {})
+                    logger.info(f"📥 [IPC] Received notification: {method}")
+                    
+                    if method in self.notification_handlers:
+                        # Spin up the handler in the background
+                        asyncio.create_task(self.notification_handlers[method](params))
+                    else:
+                        logger.warning(f"⚠️ [IPC] No handler registered for notification: {method}")
+                    continue
                 
                 # Check if this is a RESPONSE to a reverse-request we sent
                 if "result" in req and req.get("id") in self.pending_requests:
@@ -313,8 +335,43 @@ class JsonRpcUdsServer:
             "elapsed_ms": round(elapsed_ms, 2)
         }
 
+async def handle_terminal_error(params: dict):
+    """Callback triggered when VS Code detects a terminal failure."""
+    command = params.get("command", "unknown")
+    exit_code = params.get("exit_code", -1)
+    error_output = params.get("error_output", "")
+    
+    logger.info(f"\n🚨 [Proactive AI] Intercepted terminal error for command: {command}")
+    
+    goal = (
+        f"The user ran the terminal command `{command}` which failed with exit code {exit_code}.\n"
+        f"Here is the error output:\n```\n{error_output}\n```\n"
+        f"Analyze this error. Use codebase search tools if you need context, "
+        f"and propose a fix using the terminal_proxy tool."
+    )
+    
+    # Initialize a fresh Agent instance for this background task
+    # Note: Ensure you import Agent and OllamaProxyProvider at the top of your file if not already there
+    try:
+        active_profile_name = server.config.get("active_profile", "home")
+        active_config = server.config.get("profiles", {}).get(active_profile_name, {})
+        llm = OllamaProxyProvider(
+            endpoint_url=active_config.get("llm", {}).get("endpoint_url"),
+            model=active_config.get("llm", {}).get("model_name")
+        )
+        
+        agent = Agent(llm_provider=llm, config=active_config, uds_server=server)
+        logger.info("🧠 [Proactive AI] Spinning up background agent to deduce a fix...")
+        await agent.run(goal)
+    except Exception as e:
+        logger.error(f"Failed to start proactive agent: {e}")
+
 if __name__ == "__main__":
     server = JsonRpcUdsServer()
+    
+    # Register the handler before starting the server
+    server.register_notification_handler("terminal_error_detected", handle_terminal_error)
+    
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:

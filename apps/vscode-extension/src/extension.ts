@@ -23,6 +23,48 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
     });
 
+    // ---------------------------------------------------------
+    // PROACTIVE AI: Terminal Error Watcher
+    // ---------------------------------------------------------
+    context.subscriptions.push(
+        vscode.window.onDidEndTerminalShellExecution(async (event) => {
+            const exitCode = event.exitCode;
+            
+            // If exitCode is undefined, the command was cancelled. 
+            // If it's > 0, the command failed.
+            if (exitCode !== undefined && exitCode > 0) {
+                const commandLine = event.execution.commandLine.value;
+                
+                // Ignore empty commands or simple typos that don't need AI
+                if (!commandLine.trim()) return;
+
+                console.log(`🚨 Terminal command failed: ${commandLine} (Exit Code: ${exitCode})`);
+
+                // Extract the terminal output stream
+                let terminalOutput = "";
+                try {
+                    // event.terminal.shellIntegration is required for this to work
+                    for await (const data of event.execution.read()) {
+                        terminalOutput += data;
+                    }
+                } catch (error) {
+                    console.error("Failed to read terminal output", error);
+                    terminalOutput = "Error reading terminal output stream.";
+                }
+
+                // Strip out excessive ANSI color codes for the LLM
+                const cleanOutput = terminalOutput.replace(/\x1b\[[0-9;]*m/g, '').trim();
+
+                // Push the notification to the Python orchestrator
+                udsClient.sendNotification("terminal_error_detected", {
+                    command: commandLine,
+                    exit_code: exitCode,
+                    error_output: cleanOutput
+                });
+            }
+        })
+    );
+
     // Create a dedicated Output Channel for our search results
     const searchOutputChannel = vscode.window.createOutputChannel('Local Agentic Search');
     context.subscriptions.push(searchOutputChannel);
