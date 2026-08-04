@@ -112,7 +112,7 @@ class JsonRpcUdsServer:
         except Exception as e:
             logger.error(f"Error dispatching request: {e}")
 
-    async def request_client_context(self, method: str) -> dict:
+    async def request_client_context(self, method: str, params: dict = None) -> dict:        
         """Sends a JSON-RPC request to VS Code and awaits the response."""
         if not self.active_writer:
             raise ConnectionError("No active VS Code client connected.")
@@ -122,7 +122,7 @@ class JsonRpcUdsServer:
             "jsonrpc": "2.0",
             "id": req_id,
             "method": method,
-            "params": {}
+            "params": params or {}
         }
         
         # Create a Future object to suspend execution until Node.js replies
@@ -136,7 +136,7 @@ class JsonRpcUdsServer:
         
         # Wait here until the response handler (above) sets the result
         try:
-            return await asyncio.wait_for(future, timeout=5.0)
+            return await asyncio.wait_for(future, timeout=300.0)
         except asyncio.TimeoutError:
             self.pending_requests.pop(req_id, None)
             return {"content": "Error: VS Code client timed out."}
