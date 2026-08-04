@@ -40,16 +40,18 @@ class AgentState:
 
 # --- Tool Dispatcher ---
 
-# --- Tool Dispatcher ---
-
 class ToolDispatcher:
     """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
     
     def __init__(self, uds_server=None):
         self.uds_server = uds_server
         # Strict deny-list for highly destructive or interactive commands
-        self.shell_deny_list = ["rm", "sudo", "mkfs", "chown", "chmod", "shutdown", "reboot", "nano", "vim", "top"]
-        
+        self.shell_deny_list = [
+            "rm", "sudo", "mkfs", "fdisk", "dd", "chown", "chmod", 
+            "shutdown", "reboot", "ufw", "iptables", "firewall-cmd", 
+            "nano", "vim", "top", "history"
+        ]
+
     async def execute_async(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         print(f"🔧 [Tool Call] Dispatching '{tool_name}' with args: {arguments}")
         
@@ -116,7 +118,8 @@ class ToolDispatcher:
         # Pre-execution Deny-List Check
         command_lower = command.lower()
         if any(forbidden in command_lower.split() for forbidden in self.shell_deny_list):
-             return f"Action Blocked: Command contains forbidden keywords."
+            # Return a strict security violation observation payload
+             return f"SECURITY VIOLATION: Command execution blocked. '{command}' contains forbidden keywords."
             
         # TIER 3: Shell commands (Requires Explicit Modal Confirmation)
         if not self.uds_server:
