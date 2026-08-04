@@ -213,4 +213,24 @@ export class UdsClient {
             this.client.write(JSON.stringify(payload) + '\n');
         });
     }
+
+    /**
+     * Sends a spontaneous JSON-RPC notification to the Python server.
+     * Unlike a request, a notification does not expect a response, so it has no ID.
+     */
+    public sendNotification(method: string, params: any): void {
+        if (!this.client) {
+            console.warn("Cannot send notification: IPC client is not connected.");
+            return;
+        }
+
+        const notification = {
+            jsonrpc: "2.0",
+            method: method,
+            params: params
+        };
+        
+        this.client.write(JSON.stringify(notification) + '\n');
+        console.log(`📡 [IPC] Pushed notification: ${method}`);
+    }
 }
