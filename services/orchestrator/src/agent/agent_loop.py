@@ -40,17 +40,24 @@ class AgentState:
 
 # --- Tool Dispatcher ---
 
+# --- Tool Dispatcher ---
+
 class ToolDispatcher:
-    """Handles structured JSON tool requests for the environment."""
+    """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
     
-    def execute(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+    def __init__(self, uds_server=None):
+        self.uds_server = uds_server
+        # Strict deny-list for highly destructive or interactive commands
+        self.shell_deny_list = ["rm", "sudo", "mkfs", "chown", "chmod", "shutdown", "reboot", "nano", "vim", "top"]
+        
+    async def execute_async(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         print(f"🔧 [Tool Call] Dispatching '{tool_name}' with args: {arguments}")
         
         try:
             if tool_name == "file_system":
-                return self._handle_file_system(arguments)
+                return await self._handle_file_system_async(arguments)
             elif tool_name == "terminal_proxy":
-                return self._handle_terminal_proxy(arguments)
+                return await self._handle_terminal_proxy_async(arguments)
             elif tool_name == "finish_task":
                 return "Task marked as complete by the agent."
             else:
@@ -58,13 +65,13 @@ class ToolDispatcher:
         except Exception as e:
             return f"Error executing {tool_name}: {str(e)}"
 
-    def _handle_file_system(self, args: Dict[str, Any]) -> str:
+    async def _handle_file_system_async(self, args: Dict[str, Any]) -> str:
         action = args.get("action")
         path = args.get("path", ".")
         
+        # TIER 1: Read-only actions (Auto-Approve)
         if action == "read":
             if os.path.isdir(path):
-                # Return actual directory listing so the LLM has data to work with
                 files = os.listdir(path)
                 return f"Directory listing for '{path}': {json.dumps(files)}"
             elif os.path.isfile(path):
@@ -73,30 +80,69 @@ class ToolDispatcher:
                 return f"File content of '{path}':\n{content}"
             else:
                 return f"Error: Path '{path}' does not exist."
+                
+        # TIER 2: File writes (Requires VS Code Staged Diff Approval)
         elif action == "write":
             content = args.get("content", "")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-            return f"Successfully wrote to file '{path}'."
+            
+            if not self.uds_server:
+                return "Error: Cannot request write permission. IPC Server not attached."
+                
+            print(f"⏸️  [Proxy] Requesting write permission for '{path}'...")
+            # Suspend and ask VS Code for permission
+            response = await self.uds_server.request_client_context("request_write_permission", {
+                "path": path,
+                "content": content
+            })
+            
+            # -> NEW: Explicitly check if the UI timed out
+            if "content" in response and "timed out" in response["content"]:
+                return response["content"]
+            
+            if response.get("status") == "approved":
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return f"Successfully wrote to file '{path}'."
+            else:
+                return f"Action Blocked: The user denied the file write request for '{path}'."
         
         return f"Error: Unsupported file system action '{action}'."
 
-    def _handle_terminal_proxy(self, args: Dict[str, Any]) -> str:
+    async def _handle_terminal_proxy_async(self, args: Dict[str, Any]) -> str:
         command = args.get("command")
         if not command:
             return "Error: No command provided."
             
-        # Execute real terminal command safely
-        result = subprocess.run(
-            command, 
-            shell=True, 
-            capture_output=True, 
-            text=True, 
-            cwd=os.getcwd()
-        )
+        # Pre-execution Deny-List Check
+        command_lower = command.lower()
+        if any(forbidden in command_lower.split() for forbidden in self.shell_deny_list):
+             return f"Action Blocked: Command contains forbidden keywords."
+            
+        # TIER 3: Shell commands (Requires Explicit Modal Confirmation)
+        if not self.uds_server:
+            return "Error: Cannot request shell permission. IPC Server not attached."
+            
+        print(f"⏸️  [Proxy] Requesting shell execution permission for '{command}'...")
+        response = await self.uds_server.request_client_context("request_shell_permission", {
+            "command": command
+        })
         
-        output = result.stdout if result.returncode == 0 else result.stderr
-        return f"Command exit code {result.returncode}.\nOutput:\n{output}"
+        # -> NEW: Explicitly check if the UI timed out
+        if "content" in response and "timed out" in response["content"]:
+            return response["content"]
+        
+        if response.get("status") == "approved":
+            result = subprocess.run(
+                command, 
+                shell=True, 
+                capture_output=True, 
+                text=True, 
+                cwd=os.getcwd()
+            )
+            output = result.stdout if result.returncode == 0 else result.stderr
+            return f"Command exit code {result.returncode}.\nOutput:\n{output}"
+        else:
+            return "Action Blocked: The user denied the shell execution request."
 
 # --- Tool Registry ---
 
@@ -179,15 +225,13 @@ class ToolRegistry:
 
 # --- Agent Core ---
 
-# --- Agent Core ---
-
 class Agent:
     """The central state machine managing the ReAct loop."""
 
     def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None):
         self.llm_provider = llm_provider
-        self.dispatcher = ToolDispatcher()
-        
+        self.dispatcher = ToolDispatcher(uds_server=uds_server)        
+
         # 1. Initialize the ToolRegistry so it exists on the Agent!
         self.tool_registry = ToolRegistry(uds_server=uds_server)
         self.max_iterations = 10
@@ -234,7 +278,7 @@ class Agent:
             Do not include any conversational text or markdown formatting. 
             You have access to the following tools:
             1. 'terminal_proxy' - args: {{"command": "<bash command>"}}
-            2. 'file_system' - args: {{"action": "<read/write>", "path": "<file path>"}}
+            2. 'file_system' - args: {{"action": "<read/write>", "path": "<file path>", "content": "<string to write>"}}
             3. 'finish_task' - args: {{"summary": "<summary of results>"}}
 
             AVAILABLE CONTEXT TOOLS:
@@ -245,9 +289,10 @@ class Agent:
 
             CRITICAL INSTRUCTIONS FOR VS CODE CONTEXT:
             - You are running inside VS Code. You DO NOT know what file the user is looking at by default.
-            - If the user asks about "this file", "my code", or "the current file", you are strictly FORBIDDEN from using the `terminal_proxy` or `file_system` tools to guess the file path.
-            - You MUST use the `get_active_file_content` tool to read the file. 
-            - You MUST use the `get_selected_text` tool to read highlighted code.
+            - NEVER guess or hallucinate file paths (e.g., do not use '*/untitled.py' or 'VSCodeActiveFile').
+            - If the user asks to modify "this file", "my code", or "the current file", you MUST call `get_active_file_content` FIRST to discover the absolute file path.
+            - You are STRICTLY FORBIDDEN from using the `file_system` tool to write to a file until you have called `get_active_file_content` to get its exact path.
+            - WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file. Never provide partial snippets or broken patches.
             """
             
             context = self.memory.build_safe_context(state, system_prompt)
@@ -271,8 +316,8 @@ class Agent:
                 observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
             else:
                 # Execute original synchronous tools (terminal_proxy, file_system)
-                observation = self.dispatcher.execute(tool_name, tool_args)
-                
+                observation = await self.dispatcher.execute_async(tool_name, tool_args)                
+
             print(f"👀 [Observation] {observation}")
             
             if tool_name == "error" and "Connection Error" in str(llm_response.get("reasoning", "")):
@@ -288,6 +333,8 @@ class Agent:
             print("\n🏁 --- Agent Loop Completed ---")
             
         return state
+
+# --- Agent Core ---
 
 class OllamaProxyProvider:
     """Connects the Python agent loop to the local Warp proxy on port 11435."""
