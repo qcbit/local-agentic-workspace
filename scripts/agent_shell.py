@@ -69,7 +69,19 @@ def send_to_agent(user_prompt: str):
                         
                     # 2. Is this the final result matching our original request ID?
                     if "result" in msg and msg.get("id") == req_id:
-                        print(f"\n✅ Agent Finished:\n{msg['result'].get('final_observation')}\n")
+                        res = msg["result"]
+                        
+                        # Dynamically extract the text regardless of the UDS server's return structure
+                        if isinstance(res, dict):
+                            final_text = res.get("final_observation", res.get("summary", json.dumps(res, indent=2)))
+                        else:
+                            final_text = str(res)
+                            
+                        # If it is STILL empty, alert the user
+                        if not final_text.strip():
+                            final_text = "⚠️ The agent finished, but returned an empty summary payload."
+                            
+                        print(f"\n✅ Agent Finished:\n{final_text}\n")
                         return
                         
                     # 3. Did the agent loop crash?
@@ -150,6 +162,40 @@ def main():
         except EOFError:
             # Handle Ctrl+D
             break
+
+def main():
+    print("🚀 Welcome to the Agent Shell. Type normal commands, or use '@agent' to talk to the AI.")
+
+    while True:
+        try:
+            # 1. Write the prompt directly to the standard output buffer
+            sys.stdout.write("(agent-shell) $ ")
+            sys.stdout.flush() # Force it to print immediately
+
+            # 2. Read directly from the standard input stream
+            raw_input = sys.stdin.readline()
+            
+            # Catch Ctrl+D (EOF)
+            if not raw_input:
+                break
+                
+            user_input = raw_input.strip()
+
+            if not user_input:
+                continue
+
+            if user_input.lower() in ['exit', 'quit']:
+                break
+
+            if user_input.startswith("@agent"):
+                actual_prompt = user_input[len("@agent"):].strip()
+                send_to_agent(actual_prompt)
+            else:
+                execute_shell_command(user_input)
+
+        except KeyboardInterrupt:
+            print() 
+            continue
 
 if __name__ == "__main__":
     main()

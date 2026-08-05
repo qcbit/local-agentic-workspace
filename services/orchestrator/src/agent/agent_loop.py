@@ -234,6 +234,7 @@ class Agent:
     def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None):
         self.llm_provider = llm_provider
         self.dispatcher = ToolDispatcher(uds_server=uds_server)        
+        self.uds_server = uds_server
 
         # 1. Initialize the ToolRegistry so it exists on the Agent!
         self.tool_registry = ToolRegistry(uds_server=uds_server)
@@ -282,24 +283,36 @@ class Agent:
             You have access to the following tools:
             1. 'terminal_proxy' - args: {{"command": "<bash command>"}}
             2. 'file_system' - args: {{"action": "<read/write>", "path": "<file path>", "content": "<string to write>"}}
-            3. 'finish_task' - args: {{"summary": "<summary of results>"}}
+            3. 'finish_task' - args: {{"summary": "<The comprehensive final answer, data, or requested information to show the user>"}}
 
             AVAILABLE CONTEXT TOOLS:
             {tool_descriptions}
 
             Your output must be a single JSON object with EXACTLY these keys: "reasoning" (string), "tool" (string), and "tool_args" (dictionary). 
-            When you have achieved the user's goal based on the observations, you MUST call 'finish_task'.
+            
+            CRITICAL RULES:
+            - If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}
+            - Never use Python-style 'None'. Use strict JSON only.
+            - Once you have achieved the user's goal based on the observations, you MUST IMMEDIATELY call 'finish_task'. Do not explore further.
+            - The 'summary' argument in 'finish_task' is the ONLY information the user will see. You MUST include the actual results, lists, code, or data requested by the user in this summary. Never just say "task complete".
 
             CRITICAL INSTRUCTIONS FOR VS CODE CONTEXT:
             - You are running inside VS Code. You DO NOT know what file the user is looking at by default.
-            - NEVER guess or hallucinate file paths (e.g., do not use '*/untitled.py' or 'VSCodeActiveFile').
-            - If the user asks to modify "this file", "my code", or "the current file", you MUST call `get_active_file_content` FIRST to discover the absolute file path.
+            - NEVER guess or hallucinate file paths.
+            - If the user asks to modify "this file" or "my code", you MUST call `get_active_file_content` FIRST to discover the absolute file path.
             - You are STRICTLY FORBIDDEN from using the `file_system` tool to write to a file until you have called `get_active_file_content` to get its exact path.
-            - WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file. Never provide partial snippets or broken patches.
+            - WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file.
             """
             
             context = self.memory.build_safe_context(state, system_prompt)
             llm_response = self.reason(context)
+
+            if self.uds_server:
+                reasoning_text = llm_response.get("reasoning", "...")
+                await self.uds_server.send_notification(
+                    "agent_status", 
+                    {"message": f"🧠 Thinking: {reasoning_text}"}
+                )
             
             state.history.append(Message(role=Role.ASSISTANT, content=json.dumps(llm_response)))
 
@@ -310,6 +323,10 @@ class Agent:
                 state.is_complete = True
                 summary = tool_args.get("summary", "Task completed successfully.")
                 print(f"✅ [Observation] {summary}")
+                
+                # Actually save the summary to the state so the server can return it
+                state.summary = summary 
+                
                 state.history.append(Message(role=Role.TOOL, content=summary, name=tool_name))
                 break
 

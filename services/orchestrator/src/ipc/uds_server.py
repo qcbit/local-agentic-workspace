@@ -335,6 +335,22 @@ class JsonRpcUdsServer:
             "elapsed_ms": round(elapsed_ms, 2)
         }
 
+    async def send_notification(self, method: str, params: dict):
+        """Pushes a one-way notification to the connected client."""
+        if not self.active_writer:
+            return
+            
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }
+        try:
+            self.active_writer.write((json.dumps(payload) + '\n').encode('utf-8'))
+            await self.active_writer.drain()
+        except Exception as e:
+            logger.error(f"Failed to send notification: {e}")
+
 async def handle_terminal_error(params: dict):
     """Callback triggered when VS Code detects a terminal failure."""
     command = params.get("command", "unknown")
