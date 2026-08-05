@@ -5,3 +5,4 @@ tree-sitter
 tree-sitter-python
 tree-sitter-typescript
 fastembed
+prompt_toolkit
