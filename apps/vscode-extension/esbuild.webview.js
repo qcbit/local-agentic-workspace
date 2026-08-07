@@ -7,7 +7,11 @@ esbuild.build({
     },
     bundle: true,
     outdir: 'out',
-    format: 'iife',     // Immediately Invoked Function Expression for browser
+    format: 'iife',
     minify: true,
     sourcemap: true,
+    // Add this define block to prevent React from crashing
+    define: {
+        'process.env.NODE_ENV': '"production"' 
+    }
 }).catch(() => process.exit(1));

@@ -111,37 +111,15 @@ export class UdsClient {
                                 const filePath = msg.params?.path;
                                 const newContent = msg.params?.content;
                                 
-                                // Create a temporary file in the OS temp directory to act as the right-side of the diff
-                                const tempFileName = `proposed_${path.basename(filePath)}`;
-                                const tempPath = path.join(os.tmpdir(), tempFileName);
-                                fs.writeFileSync(tempPath, newContent, 'utf8');
-
-                                // Open the native VS Code side-by-side diff view
-                                const originalUri = vscode.Uri.file(filePath);
-                                const proposedUri = vscode.Uri.file(tempPath);
-                                await vscode.commands.executeCommand('vscode.diff', originalUri, proposedUri, '(Original) ↔ (AI Proposed)');
-
-                                // Display the overlay approval modal
-                                const choice = await vscode.window.showInformationMessage(
-                                    `Review the proposed changes for ${path.basename(filePath)} in the background window.\n\nDo you approve this file write?`,
-                                    { modal: true },
-                                    "Approve",
-                                    "Reject"
+                                // Pause the IPC stream and delegate the UI to extension.ts
+                                const response: any = await vscode.commands.executeCommand(
+                                    'agenticWorkspace.handleWriteRequest', 
+                                    filePath, 
+                                    newContent
                                 );
-
-                                // Clean up the temporary file
-                                if (fs.existsSync(tempPath)) {
-                                    fs.unlinkSync(tempPath);
-                                }
-
-                                // Force VS Code to close the active diff tab
-                                await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-
-                                // Re-open and focus the original file so you can see the changes instantly
-                                const doc = await vscode.workspace.openTextDocument(originalUri);
-                                await vscode.window.showTextDocument(doc);
-
-                                resultPayload = { status: choice === "Approve" ? "approved" : "denied" };
+                                
+                                // The command will return { status: "approved" | "denied" }
+                                resultPayload = response; 
                             }
 
                             // Fire the response back to Python using Python's exact ID

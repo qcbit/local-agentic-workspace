@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 
 declare const acquireVsCodeApi: any;
-const vscode = acquireVsCodeApi();
+const vscode = (window as any).vscodeApi || ((window as any).vscodeApi = acquireVsCodeApi());
 
 export const SettingsPanel: React.FC = () => {
     const [activeProfile, setActiveProfile] = useState('home');

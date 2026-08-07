@@ -17,16 +17,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     ) {
         this._view = webviewView;
 
+        // 1. Only authorize the 'out' directory
         webviewView.webview.options = {
             enableScripts: true,
-            localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'out')]
+            localResourceRoots: [
+                vscode.Uri.joinPath(this._extensionUri, 'out')
+            ]
         };
 
+        // 2. Point directly to the newly isolated chat.js bundle
         const scriptUri = webviewView.webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, 'out', 'chat.js')
         );
 
-        webviewView.webview.html = this._getHtmlForWebview(scriptUri);
+        // 3. Inject a completely clean HTML template without the missing icon
+        webviewView.webview.html = `
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Agent Chat</title>
+            </head>
+            <body>
+                <div id="root"></div>
+                <script src="${scriptUri}"></script>
+            </body>
+            </html>
+        `;
 
         // Listen for the prompt from React, send it to Python via IPC
         webviewView.webview.onDidReceiveMessage(async (data) => {
@@ -61,10 +79,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             <title>Agent Chat</title>
         </head>
         <body>
+            <!-- This will catch and print any React/JS crashes directly to the sidebar! -->
+            <div id="error-output" style="color: #ff6b6b; font-family: monospace; padding: 10px; font-weight: bold; white-space: pre-wrap;"></div>
+            
             <div id="root"></div>
+            
+            <script>
+                // Catch standard errors
+                window.onerror = function(message, source, lineno, colno, error) {
+                    document.getElementById('error-output').textContent += '🚨 ERROR: ' + message + '\\n';
+                    return false;
+                };
+                // Catch promise rejections
+                window.addEventListener('unhandledrejection', function(event) {
+                    document.getElementById('error-output').textContent += '🚨 PROMISE REJECTION: ' + (event.reason.stack || event.reason) + '\\n';
+                });
+            </script>
+            
             <script src="${scriptUri}"></script>
         </body>
         </html>
-        `;
+    `;
     }
 }

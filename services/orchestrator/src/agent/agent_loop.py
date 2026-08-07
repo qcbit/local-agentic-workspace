@@ -300,6 +300,8 @@ class Agent:
             - You are running inside VS Code. You DO NOT know what file the user is looking at by default.
             - NEVER guess or hallucinate file paths.
             - If the user asks to modify "this file" or "my code", you MUST call `get_active_file_content` FIRST to discover the absolute file path.
+            - When asked to fix, refactor, or resolve an issue, the goal is NOT just to find the answer. The goal is to physically apply the code change.
+            - To apply a fix, you must ALWAYS call the `file_system` tool with `"action": "write"`. Never use `finish_task` to simply describe the solution.
             - You are STRICTLY FORBIDDEN from using the `file_system` tool to write to a file until you have called `get_active_file_content` to get its exact path.
             - WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file.
             """

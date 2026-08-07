@@ -6,10 +6,12 @@ import { AgenticDiffProvider } from './providers/DiffProvider';
 import { UdsClient } from './ipc/UdsClient';
 import { WarpProxyServer } from './proxy/WarpProxyServer';
 import { ChatViewProvider } from './providers/ChatViewProvider';
+import { AgentApprovalCodeLensProvider } from './codelens';
 
 let udsClient: UdsClient;
 let proxyServer: WarpProxyServer;
 let statusBarItem: vscode.StatusBarItem;
+const codeLensProvider = new AgentApprovalCodeLensProvider();
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Local Agentic Workspace extension is now active.');
@@ -64,6 +66,60 @@ export function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    // We store the resolver here temporarily while the diff is open waiting for the user
+    let pendingWriteResolve: ((value: { status: string }) => void) | null = null;
+
+    // 1. Register CodeLens to the EXACT scheme used by your DiffProvider
+    context.subscriptions.push(
+        vscode.languages.registerCodeLensProvider(
+            { scheme: AgenticDiffProvider.scheme }, 
+            codeLensProvider
+        )
+    );
+
+    // 2. The Internal Command called by UdsClient
+    context.subscriptions.push(
+        vscode.commands.registerCommand('agenticWorkspace.handleWriteRequest', async (filePath: string, newContent: string) => {
+            return new Promise((resolve) => {
+                pendingWriteResolve = resolve;
+
+                const originalUri = vscode.Uri.file(filePath);
+                const virtualUri = AgenticDiffProvider.getVirtualUri(originalUri);
+
+                // Populate your existing virtual diff provider with the AI's content
+                diffProvider.updateContent(virtualUri, newContent);
+
+                // Open the diff view natively
+                vscode.commands.executeCommand(
+                    'vscode.diff',
+                    originalUri,
+                    virtualUri,
+                    `Agent Proposed Changes ↔ ${path.basename(filePath)}`
+                );
+
+                // Tell the CodeLens provider to show the Accept/Reject buttons over the code
+                codeLensProvider.setPendingState(true);
+            });
+        })
+    );
+
+    // 3. The Commands triggered when the user clicks the CodeLens buttons
+    context.subscriptions.push(vscode.commands.registerCommand('agenticWorkspace.approveWrite', async () => {
+        codeLensProvider.setPendingState(false);
+        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        
+        // Note: We don't need to write the file here in TS.
+        // We just tell Python "approved", and the Python file_system tool does the writing!
+        if (pendingWriteResolve) pendingWriteResolve({ status: 'approved' });
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('agenticWorkspace.rejectWrite', async () => {
+        codeLensProvider.setPendingState(false);
+        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        
+        if (pendingWriteResolve) pendingWriteResolve({ status: 'denied' });
+    }));
 
     // Create a dedicated Output Channel for our search results
     const searchOutputChannel = vscode.window.createOutputChannel('Local Agentic Search');
@@ -189,7 +245,26 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 8. Register the AST Test Command (from Task 2.2)
     const testAstCommand = vscode.commands.registerCommand('localAgentic.testAST', async () => {
-        // ... (Keep your existing AST test code here)
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage('No active editor found to parse.');
+            return;
+        }
+
+        try {
+            vscode.window.showInformationMessage(`Running AST parser on ${path.basename(editor.document.fileName)}...`);
+            
+            // Call your AST provider here. Adjust the method name if it's not "parseDocument"
+            const parsedTree = await astProvider.parseDocument(editor.document);
+            
+            console.log(`🌲 AST Output for ${path.basename(editor.document.fileName)}:`);
+            console.log(parsedTree);
+            
+            vscode.window.showInformationMessage('AST parsing complete! Check the Debug Console.');
+        } catch (error: any) {
+            console.error('AST Error:', error);
+            vscode.window.showErrorMessage(`AST Parsing failed: ${error.message}`);
+        }
     });
     context.subscriptions.push(testAstCommand)
 
@@ -208,6 +283,9 @@ export function activate(context: vscode.ExtensionContext) {
         const mockAiProposedText = "// -- AI PROPOSED REFACTOR --\n\n" + originalText.split('\n').reverse().join('\n');
 
         diffProvider.updateContent(virtualUri, mockAiProposedText);
+
+        // Tell the CodeLens provider to show the buttons
+        codeLensProvider.setPendingState(true);
 
         await vscode.commands.executeCommand(
             'vscode.diff',
