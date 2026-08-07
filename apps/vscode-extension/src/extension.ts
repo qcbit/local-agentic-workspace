@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as http from 'http';
 import { ASTProvider } from './ast/ASTProvider';
 import { AgenticDiffProvider } from './providers/DiffProvider';
 import { UdsClient } from './ipc/UdsClient';
@@ -183,7 +184,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(configWatcher);
 
     // 4. Register the Settings UI Command
-    let disposableSettings = vscode.commands.registerCommand('localAgenticWorkspace.showSettings', () => {
+    let disposableSettings = vscode.commands.registerCommand('localAgenticWorkspace.showSettings', async () => {
         const panel = vscode.window.createWebviewPanel(
             'agentSettings',
             'Agentic Workspace Settings',
@@ -196,6 +197,29 @@ export function activate(context: vscode.ExtensionContext) {
 
         const scriptPathOnDisk = vscode.Uri.file(path.join(context.extensionPath, 'out', 'webview.js'));
         const scriptUri = panel.webview.asWebviewUri(scriptPathOnDisk);
+
+        // Fetch models from the local Ollama API
+        const fetchModels = (): Promise<string[]> => {
+            return new Promise((resolve) => {
+                http.get('http://127.0.0.1:11434/api/tags', (res) => {
+                    let data = '';
+                    res.on('data', chunk => data += chunk);
+                    res.on('end', () => {
+                        try {
+                            const parsed = JSON.parse(data);
+                            const models = parsed.models.map((m: any) => m.name);
+                            resolve(models);
+                        } catch (e) {
+                            console.error('Failed to parse models', e);
+                            resolve(['llama3:8b', 'qwen2.5-coder:7b']); // Fallback defaults
+                        }
+                    });
+                }).on('error', (e) => {
+                    console.error('Failed to reach local LLM API', e);
+                    resolve(['llama3:8b', 'qwen2.5-coder:7b']); // Fallback defaults
+                });
+            });
+        };
 
         panel.webview.html = `
             <!DOCTYPE html>
@@ -213,7 +237,31 @@ export function activate(context: vscode.ExtensionContext) {
         `;
 
         panel.webview.onDidReceiveMessage(async (message) => {
-            if (message.command === 'updateSetting') {
+            if (message.command === 'ready') {
+                // 1. When React tells us it's mounted, fetch and send the models
+                const availableModels = await fetchModels();
+                panel.webview.postMessage({ 
+                    command: 'loadModels', 
+                    models: availableModels 
+                });
+                // 2. Fetch the true configuration from the Python orchestrator
+                try {
+                    const configData = await udsClient.request('get_config', {});
+                    panel.webview.postMessage({
+                        command: 'loadConfig',
+                        config: configData
+                    });
+                } catch (error: any) {
+                    console.error('Failed to fetch config from backend:', error);
+                    vscode.window.showErrorMessage(`Could not load current settings: ${error.message}`);
+
+                    // 🛡️ FAILSAFE: Tell React to stop loading and fall back to defaults
+                    panel.webview.postMessage({
+                        command: 'loadConfig',
+                        config: null 
+                    });
+                }
+            } else if (message.command === 'updateSetting') {
                 try {
                     await udsClient.request('update_config', message.config);
                     vscode.window.showInformationMessage('Settings successfully synced to Orchestrator!');

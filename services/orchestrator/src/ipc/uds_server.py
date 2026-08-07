@@ -1,14 +1,15 @@
 import asyncio
+import collections.abc
 import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 import socket
 import stat
 import sys
-import uuid
-from pathlib import Path
 from typing import Any, Dict, Optional
+import uuid
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(script_dir, ".."))                             # .../services/orchestrator/src
@@ -28,6 +29,15 @@ if project_root not in sys.path:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+def deep_update(d, u):
+    """Recursively merges dictionary 'u' into dictionary 'd'."""
+    for k, v in u.items():
+        if isinstance(v, collections.abc.Mapping):
+            d[k] = deep_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
 
 class JsonRpcUdsServer:
     """JSON-RPC 2.0 Server over Unix Domain Sockets."""
@@ -163,6 +173,55 @@ class JsonRpcUdsServer:
             self.pending_requests.pop(req_id, None)
             return {"content": "Error: VS Code client timed out."}
 
+    def handle_update_config(self, payload: dict):
+        # 1. Use the globally defined project_root to ensure consistency with _load_config
+        config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
+        
+        logger.info(f"⚙️ Target config path: {config_path}")
+
+        # 2. Load the existing config
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+        except FileNotFoundError:
+            logger.error(f"❌ Failed to locate config file at: {config_path}")
+            return {"error": f"config.json not found at {config_path}"}
+        except Exception as e:
+            logger.error(f"❌ Error reading config.json: {e}")
+            return {"error": str(e)}
+
+        # 3. Extract incoming payload data
+        active_profile = payload.get("active_profile")
+        profile_settings = payload.get("profile_settings", {})
+
+        if active_profile:
+            config_data["active_profile"] = active_profile
+            
+            # 4. Safely DEEP MERGE new settings into the active profile
+            if "profiles" in config_data and active_profile in config_data["profiles"]:
+                config_data["profiles"][active_profile] = deep_update(
+                    config_data["profiles"][active_profile], 
+                    profile_settings
+                )
+            else:
+                if "profiles" not in config_data:
+                    config_data["profiles"] = {}
+                config_data["profiles"][active_profile] = profile_settings
+
+        # 5. Write updated config back to disk
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, indent=4)
+        except Exception as e:
+            logger.error(f"❌ Failed to write config.json: {e}")
+            return {"error": f"Failed to save file: {e}"}
+
+        # 6. Update in-memory reference
+        self.config = config_data
+
+        logger.info(f"✅ Config successfully updated on disk and in memory for profile: '{active_profile}'")
+        return {"status": "success", "message": "Configuration merged and saved."}
+
     async def process_request(self, payload: str) -> Dict[str, Any]:
         """Validates and routes the JSON-RPC 2.0 payload."""
         req = {}
@@ -187,7 +246,6 @@ class JsonRpcUdsServer:
                 logger.info(f"🧠 [Agent Execution] Starting task: {goal}")
                 
                 try:
-                    # Offload the blocking agent loop to a worker thread
                     result_state = await self._run_agent_async(goal)
                     
                     # Extract final observation
@@ -208,27 +266,13 @@ class JsonRpcUdsServer:
                     return self._error_response(req_id, -32000, f"Agent execution error: {str(e)}")
                     
             elif method == "update_config":
-                active_profile = params.get("active_profile", "home")
-                profile_settings = params.get("profile_settings", {})
-                
-                # Update active profile marker
-                self.config["active_profile"] = active_profile
-                
-                # Merge the new settings into that specific profile
-                if "profiles" not in self.config:
-                    self.config["profiles"] = {}
-                if active_profile not in self.config["profiles"]:
-                    self.config["profiles"][active_profile] = {}
-                    
-                self.config["profiles"][active_profile].update(profile_settings)
-                
-                # Write to disk so it persists across server restarts
-                config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(self.config, f, indent=4)
-                    
-                logger.info(f"⚙️ Orchestrator configuration updated. Active profile: {active_profile}")
-                return self._success_response(req_id, {"status": "config_updated"})
+                res = self.handle_update_config(params)
+                if "error" in res:
+                    return self._error_response(req_id, -32000, res["error"])
+                return self._success_response(req_id, res)
+            elif method == "get_config":
+                # Return the currently loaded configuration directly to VS Code
+                return self._success_response(req_id, self.config)
             elif method == "sync_file":
                 return self._success_response(req_id, self._handle_sync_file(params))
             elif method == "search_codebase":
@@ -259,7 +303,7 @@ class JsonRpcUdsServer:
         return {"status": "success", "indexed_path": file_path}
 
     async def _run_agent_async(self, goal: str):
-        """Synchronous wrapper to instantiate and run the agent."""
+        """Asynchronously instantiates and runs the agent."""
         
         # 1. Determine which profile is active
         active_profile_name = self.config.get("active_profile", "home")
