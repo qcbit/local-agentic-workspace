@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 
 declare const acquireVsCodeApi: any;
-const vscode = acquireVsCodeApi();
+
+// Safely acquire the API only if it hasn't been acquired yet
+const vscode = (window as any).vscodeApi || ((window as any).vscodeApi = acquireVsCodeApi());
 
 export const ChatPanel: React.FC = () => {
     const [input, setInput] = useState('');
