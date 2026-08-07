@@ -3,13 +3,15 @@
     "profiles": {
         "home": {
             "llm": {
-                "model_name": "qwen2.5-coder",
-                "endpoint_url": "http://127.0.0.1:11434/v1/chat/completions" 
+                "model_name": "qwen2.5-coder:14b-instruct-q4_K_M",
+                "endpoint_url": "http://127.0.0.1:11434/v1/chat/completions"
+            },
+            "memory": {
+                "max_tokens": 6000
             }
-    },
-    "memory": {
-        "max_tokens": 6000
-    }
+        },
+        "memory": {
+            "max_tokens": 6000
         },
         "work": {
             "llm": {
