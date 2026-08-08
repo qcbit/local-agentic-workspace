@@ -347,6 +347,8 @@ class Agent:
             CRITICAL RULES:
             - If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}
             - Never use Python-style 'None'. Use strict JSON only.
+            - NEVER invent, hallucinate, or call tools that are not explicitly listed above. 
+            - For basic factual questions, general knowledge, or simple arithmetic (e.g., "what is 1+1?"), DO NOT call any tools. Use your internal knowledge to solve it and immediately call 'finish_task' with the answer.
             - Once you have achieved the user's goal based on the observations, you MUST IMMEDIATELY call 'finish_task'. Do not explore further.
             - The 'summary' argument in 'finish_task' is the ONLY information the user will see. You MUST include the actual results, lists, code, or data requested by the user in this summary. Never just say "task complete".
 
