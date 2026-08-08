@@ -1,8 +1,10 @@
+import ast
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 import json
 import logging
+import operator
 import os
 from pathlib import Path
 from rag.vector_store import LocalVectorStore
@@ -79,6 +81,36 @@ def is_path_safe(workspace_root: str, target_path: str) -> bool:
         return True
     except (ValueError, RuntimeError):
         return False
+
+def evaluate_math_expression(expression: str):
+    """Safely evaluates a mathematical expression using AST."""
+    allowed_operators = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.Pow: operator.pow,
+        ast.USub: operator.neg
+    }
+
+    def eval_node(node):
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float)):
+                return node.value
+            raise TypeError(f"Disallowed constant type: {type(node.value)}")
+        elif isinstance(node, ast.BinOp):
+            left = eval_node(node.left)
+            right = eval_node(node.right)
+            return allowed_operators[type(node.op)](left, right)
+        elif isinstance(node, ast.UnaryOp):
+            operand = eval_node(node.operand)
+            return allowed_operators[type(node.op)](operand)
+        else:
+            raise TypeError(f"Unsupported syntax in math expression: {type(node).__name__}")
+
+    parsed_expr = ast.parse(expression, mode='eval').body
+    return eval_node(parsed_expr)
+# -- end evaluate_math_expression ---
 
 class ToolDispatcher:
     """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
@@ -210,7 +242,20 @@ class ToolRegistry:
         self.vector_store = LocalVectorStore() 
         
         self.tools = {
-            # ... keep your existing math tool ...
+            "math_operation": {
+                "name": "math_operation",
+                "description": "Evaluates arithmetic expressions (addition, subtraction, multiplication, division). Use this tool whenever you need to perform mathematical calculations.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "expression": {
+                            "type": "string",
+                            "description": "The mathematical expression to evaluate (e.g., '1 + 1', '(145 * 3) / 2.5')."
+                        }
+                    },
+                    "required": ["expression"]
+                }
+            },
             "search_codebase": {
                 "name": "search_codebase",
                 "description": "Searches the local codebase using semantic vector embeddings. Use this when you need to find where a function, class, or variable is defined, or to understand how a specific part of the local project works.",
@@ -245,9 +290,16 @@ class ToolRegistry:
 
     async def execute_tool_async(self, tool_name: str, arguments: dict) -> Optional[str]:
         try:
-            if tool_name == "calculate_math":
-                # ... existing logic ...
-                pass
+            if tool_name == "math_operation":
+                expr = arguments.get("expression")
+                if not isinstance(expr, str) or not expr.strip():
+                    return "Error: A valid 'expression' string is required."
+                
+                try:
+                    result = evaluate_math_expression(expr)
+                    return f"Result: {result}"
+                except Exception as e:
+                    return f"Error evaluating math expression: {str(e)}"
                 
             elif tool_name == "search_codebase":
                 query = arguments.get("query")
@@ -337,7 +389,8 @@ class Agent:
             You have access to the following tools:
             1. 'terminal_proxy' - args: {{"command": "<bash command>"}}
             2. 'file_system' - args: {{"action": "<read/write>", "path": "<file path>", "content": "<string to write>"}}
-            3. 'finish_task' - args: {{"summary": "<The comprehensive final answer, data, or requested information to show the user>"}}
+            3. 'math_operation' - args: {{"expression": "<math expression>"}}
+            4. 'finish_task' - args: {{"summary": "<The comprehensive final answer, data, or requested information to show the user>"}}
 
             AVAILABLE CONTEXT TOOLS:
             {tool_descriptions}
@@ -348,7 +401,6 @@ class Agent:
             - If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}
             - Never use Python-style 'None'. Use strict JSON only.
             - NEVER invent, hallucinate, or call tools that are not explicitly listed above. 
-            - For basic factual questions, general knowledge, or simple arithmetic (e.g., "what is 1+1?"), DO NOT call any tools. Use your internal knowledge to solve it and immediately call 'finish_task' with the answer.
             - Once you have achieved the user's goal based on the observations, you MUST IMMEDIATELY call 'finish_task'. Do not explore further.
             - The 'summary' argument in 'finish_task' is the ONLY information the user will see. You MUST include the actual results, lists, code, or data requested by the user in this summary. Never just say "task complete".
 
