@@ -1,19 +1,47 @@
 import asyncio
+from dataclasses import dataclass, field
+from enum import Enum
 import json
 import logging
-from enum import Enum
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
-import urllib.request
-import urllib.error
 import os
-import subprocess
-import time
-
+from pathlib import Path
 from rag.vector_store import LocalVectorStore
 from services.orchestrator.src.memory.context_manager import SlidingContextManager
+import shlex
+import subprocess
+import time
+from typing import List, Dict, Any, Optional
+import urllib.request
+import urllib.error
 
 logger = logging.getLogger(__name__)
+
+def validate_terminal_command(workspace_root: str, command_str: str) -> tuple[bool, str]:
+    """
+    Scans a shell command for path arguments that escape the workspace root.
+    """
+    try:
+        tokens = shlex.split(command_str)
+    except Exception:
+        return False, "Error: Invalid or unparseable shell command syntax."
+
+    safe_root = Path(workspace_root).resolve(strict=True)
+
+    for token in tokens:
+        if token.startswith("/") or token.startswith("~") or ".." in token:
+            expanded_token = os.path.expanduser(token)
+            resolved_path = Path(expanded_token).resolve()
+            
+            # Remove the exists() check! Block it if it points outside, period.
+            try:
+                resolved_path.relative_to(safe_root)
+            except ValueError:
+                return False, (
+                    f"Error: Command blocked by sandbox. "
+                    f"Target path '{token}' is outside authorized workspace root."
+                )
+
+    return True, ""
 
 # --- State Definitions ---
 
@@ -40,11 +68,26 @@ class AgentState:
 
 # --- Tool Dispatcher ---
 
+def is_path_safe(workspace_root: str, target_path: str) -> bool:
+    """Strictly sandboxes file paths to the workspace root."""
+    try:
+        safe_root = Path(workspace_root).resolve(strict=True)
+        target = Path(target_path).resolve()
+        
+        # Throws ValueError if target is outside safe_root
+        target.relative_to(safe_root)
+        return True
+    except (ValueError, RuntimeError):
+        return False
+
 class ToolDispatcher:
     """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
     
-    def __init__(self, uds_server=None):
+    def __init__(self, uds_server=None, workspace_root: str = None):
         self.uds_server = uds_server
+        # Default to current directory if not provided
+        self.workspace_root = workspace_root or os.getcwd() 
+        
         # Strict deny-list for highly destructive or interactive commands
         self.shell_deny_list = [
             "rm", "sudo", "mkfs", "fdisk", "dd", "chown", "chmod", 
@@ -71,6 +114,10 @@ class ToolDispatcher:
         action = args.get("action")
         path = args.get("path", ".")
         
+        # 🛡️ SANDBOX ENFORCEMENT 
+        if not is_path_safe(self.workspace_root, path):
+            return f"Error: Access denied. Path '{path}' is outside the authorized workspace sandbox."
+
         # TIER 1: Read-only actions (Auto-Approve)
         if action == "read":
             if os.path.isdir(path):
@@ -115,6 +162,12 @@ class ToolDispatcher:
         if not command:
             return "Error: No command provided."
             
+        # Sandbox Check
+        is_safe, error_msg = validate_terminal_command(self.workspace_root, command)
+        if not is_safe:
+            logger.warning(f"🔒 [Sandbox Blocked] Command: '{command}'")
+            return error_msg  # Fed back to LLM as observation
+
         # Pre-execution Deny-List Check
         command_lower = command.lower()
         if any(forbidden in command_lower.split() for forbidden in self.shell_deny_list):
@@ -231,12 +284,13 @@ class ToolRegistry:
 class Agent:
     """The central state machine managing the ReAct loop."""
 
-    def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None):
+    def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None, workspace_root: str = None):
         self.llm_provider = llm_provider
-        self.dispatcher = ToolDispatcher(uds_server=uds_server)        
         self.uds_server = uds_server
-
-        # 1. Initialize the ToolRegistry so it exists on the Agent!
+        self.workspace_root = workspace_root or os.getcwd()
+        
+        # Pass the workspace_root down to the dispatcher
+        self.dispatcher = ToolDispatcher(uds_server=uds_server, workspace_root=self.workspace_root)        
         self.tool_registry = ToolRegistry(uds_server=uds_server)
         self.max_iterations = 10
         

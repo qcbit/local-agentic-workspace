@@ -39,6 +39,8 @@ def deep_update(d, u):
             d[k] = v
     return d
 
+
+
 class JsonRpcUdsServer:
     """JSON-RPC 2.0 Server over Unix Domain Sockets."""
     
@@ -326,7 +328,12 @@ class JsonRpcUdsServer:
         )
         
         # Pass uds_server=self so the ToolRegistry can execute context tools!
-        agent = Agent(llm_provider=llm, config=active_config, uds_server=self)
+        agent = Agent(
+            llm_provider=llm, 
+            config=active_config, 
+            uds_server=self, 
+            workspace_root=project_root  # Inject the global root here
+        )
         state = await agent.run(goal)
         return state
 
