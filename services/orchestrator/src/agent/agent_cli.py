@@ -51,7 +51,7 @@ def send_to_agent(prompt: str):
                             
                             # Safely extract the summary depending on how the backend structures it
                             if isinstance(res_data, dict):
-                                summary = res_data.get("summary", res_data)
+                                summary = res_data.get("final_observation", res_data)
                             else:
                                 summary = res_data
                                 
