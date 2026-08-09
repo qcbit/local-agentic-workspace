@@ -58,12 +58,63 @@ export function activate(context: vscode.ExtensionContext) {
                 // Strip out excessive ANSI color codes for the LLM
                 const cleanOutput = terminalOutput.replace(/\x1b\[[0-9;]*m/g, '').trim();
 
-                // Push the notification to the Python orchestrator
-                udsClient.sendNotification("terminal_error_detected", {
-                    command: commandLine,
-                    exit_code: exitCode,
-                    error_output: cleanOutput
-                });
+                // 🛡️ Interactive Auto-Fix Prompt
+                const userAction = await vscode.window.showErrorMessage(
+                    `Command failed (Exit ${exitCode}): ${commandLine}`,
+                    'Auto-Fix with Agent',
+                    'Dismiss'
+                );
+
+                if (userAction === 'Auto-Fix with Agent') {
+                    // Instruct the LLM to format commands predictably
+                    // Using Chain of Thought
+                    const autoFixPrompt = `My terminal command failed with exit code ${exitCode}.\n\n` +
+                                          `Command Executed:\n${commandLine}\n\n` +
+                                          `Terminal Output (stderr):\n${cleanOutput}\n\n` +
+                                          `Please diagnose the issue. CRITICAL INSTRUCTION: Consider the intent of the original command. If the command was a read-only or exploration command (like 'ls', 'cat', or 'echo'), DO NOT suggest creating missing files or directories unless absolutely necessary. Assume it was a typo and simply explain the error.\n\n` +
+                                          "If the issue requires executing a new or different terminal command to fix:" +
+                                                "1. Analyze the user's original intent and the current system context." +
+                                                "2. Reason through the proposed command and its potential system impacts." +
+                                                "3. If you lack high confidence in the command's safety or correctness, you must halt tool execution and ask the user for clarification before outputting the command."
+
+                    vscode.window.showInformationMessage("🧠 Agent is diagnosing the terminal error...");
+                    
+                    try {
+                        // Send the task to the agent orchestrator
+                        const response = await udsClient.request("execute_agent_task", { goal: autoFixPrompt });
+                        
+                        // Extract the final observation summary
+                        let summary = response.final_observation || response.summary || "Diagnosis complete.";
+                        
+                        // Check if the agent proposed a command to run
+                        const commandMatch = summary.match(/<command>(.*?)<\/command>/);
+                        
+                        if (commandMatch) {
+                            const proposedCommand = commandMatch[1].trim();
+                            
+                            // FIX: Replace the XML tags with markdown backticks so the command stays in the text!
+                            summary = summary.replace(/<command>(.*?)<\/command>/g, '`$1`').trim();
+                            
+                            // Show the diagnosis and provide a button to run the command
+                            const runAction = await vscode.window.showInformationMessage(
+                                `Agent Diagnosis: ${summary}`,
+                                `Run: ${proposedCommand}`,
+                                'Dismiss'
+                            );
+                            
+                            if (runAction === `Run: ${proposedCommand}`) {
+                                // 🚀 Bring the terminal to the front, then execute the fix
+                                event.terminal.show();
+                                event.terminal.sendText(proposedCommand);
+                            }
+                        } else {
+                            // Standard output if no command was proposed
+                            vscode.window.showInformationMessage(`Agent Diagnosis: ${summary}`, { modal: true });
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Agent failed to diagnose: ${err.message}`);
+                    }
+                }
             }
         })
     );
