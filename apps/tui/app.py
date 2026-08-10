@@ -1,9 +1,22 @@
 import asyncio
+import logging
+import pyperclip
+from services.orchestrator import Agent, OllamaProxyProvider
 from textual import work, on
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Header, Footer, Input, Markdown, RichLog
+from textual.binding import Binding
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import Button, Header, Footer, Input, Label, Markdown, RichLog
 from typing import AsyncGenerator
+
+# Set up file logging
+logging.basicConfig(
+    filename='agent_tui.log',
+    filemode='a', # Append mode
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 # ------------------------------------------------------------------
 # Backend Mocks (Replace these with your actual orchestrator logic)
@@ -44,6 +57,57 @@ async def actual_tool_execution(prompt: str, log_widget: RichLog):
 # ------------------------------------------------------------------
 # UI Application
 # ------------------------------------------------------------------
+
+# 2. Define the Modal Popup Screen
+class PermissionScreen(ModalScreen[bool]):
+    """A modal popup to confirm dangerous agent actions."""
+    
+    CSS = """
+    PermissionScreen {
+        align: center middle;
+        background: $background 80%; /* Dims the background */
+    }
+    #dialog {
+        grid-size: 2;
+        grid-gutter: 1 2;
+        grid-rows: 1fr 3;
+        padding: 1;
+        width: 60;
+        height: 11;
+        border: thick $accent;
+        background: $surface;
+    }
+    #question {
+        column-span: 2;
+        height: 1fr;
+        width: 1fr;
+        content-align: center middle;
+        text-style: bold;
+    }
+    Button {
+        width: 100%;
+    }
+    """
+    
+    def __init__(self, message: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        # Build the grid with a text label and two buttons
+        yield Grid(
+            Label(self.message, id="question"),
+            Button("Deny", variant="error", id="deny"),
+            Button("Approve", variant="success", id="approve"),
+            id="dialog",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        # dismiss() returns the True/False value back to whoever called push_screen_wait()
+        if event.button.id == "approve":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
 
 class AgentOrchestratorApp(App):
     """A split-pane streaming TUI for an AI Agent."""
@@ -91,6 +155,24 @@ class AgentOrchestratorApp(App):
             {"role": "system", "content": "You are a helpful AI agent orchestrator."}
         ]
 
+    # 1. Bind a key (e.g., Ctrl+y for 'yank' or copy)
+    BINDINGS = [
+        Binding("ctrl+y", "copy_last_message", "Copy Last Message")
+    ]
+
+    # 2. Define the action that runs when the key is pressed
+    def action_copy_last_message(self) -> None:
+        """Copies the most recent agent summary to the clipboard."""
+        if len(self.chat_history) > 1:
+            # Grab the last item in the history list
+            last_message = self.chat_history[-1]
+            
+            if last_message["role"] == "assistant":
+                pyperclip.copy(last_message["content"])
+                
+                # Optionally flash a notification on the screen
+                self.notify("Agent response copied to clipboard!", timeout=2)
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         
@@ -126,39 +208,55 @@ class AgentOrchestratorApp(App):
         chat_scroll.mount(Markdown(f"**You:** {user_text}", classes="message"))
         
         # Trigger the async orchestrator tasks
-        self.process_agent_turn()
+        self.process_agent_turn(user_text)
 
     @work(exclusive=True)
     async def process_agent_turn(self, prompt: str) -> None:
-        """Handles both the LLM stream and the tool execution side-by-side."""
+        """Handles the agent execution loop and streams logs to the UI."""
         chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
         tool_log = self.query_one("#tool-log", RichLog)
         
-        # 1. Fire off the tool execution to the right pane
-        # Grab the latest prompt for the tool execution mock
-        latest_prompt = self.chat_history[-1]["content"]
+        # 1. Define the callback that connects the Agent to the RichLog pane
+        def ui_logger(message: str):
+            tool_log.write(message)               # Writes to the UI
+            logging.info(f"TOOL LOG: {message}")  # Writes to agent_tui.log
 
-        # We use asyncio.create_task so it runs concurrently with the LLM stream
-        asyncio.create_task(actual_tool_execution(latest_prompt, tool_log))
-        
-        # 2. Prep the UI for the agent's text response on the left pane
-        agent_message = Markdown("**Agent:** ", classes="message")
+        # Define the async permission callback for the Agent
+        async def ask_permission(message: str) -> bool:
+            # This pauses the agent's background worker thread until the user clicks a button
+            return await self.push_screen_wait(PermissionScreen(message))
+            
+        # 2. Setup the UI for the Agent's turn
+        agent_message = Markdown("**Agent:** Thinking... ⏳", classes="message")
         await chat_scroll.mount(agent_message)
         chat_scroll.scroll_end(animate=False)
         
-        # Keep the raw response separate from the UI formatting
-        raw_response: str = ""
+        # 3. Initialize your real backend
+        llm = OllamaProxyProvider(
+            # endpoint_url="http://localhost:11434/v1/chat/completions",
+        )
+        agent = Agent(
+            llm_provider=llm, 
+            config={},
+            permission_callback=ask_permission
+        )
         
-        # 3. Stream the LLM tokens
-        # Pass the ENTIRE history list to your LLM stream
-        async for token in actual_llm_stream(self.chat_history):
-            raw_response += token
-            # Prefix the UI update with the bold Agent tag
-            agent_message.update(f"**Agent:** {raw_response}")
-            chat_scroll.scroll_end(animate=False)
+        try:
+            # 4. Await the execution loop, passing in the ui_logger
+            final_state = await agent.run(prompt, ui_callback=ui_logger)
             
-        # Finally, save the agent's completed response to the state
-        self.chat_history.append({"role": "assistant", "content": raw_response})
+            # 5. When the loop hits 'finish_task', update the chat pane with the final summary
+            agent_message.update(f"**Agent:** {final_state.summary}")
+            
+            # 6. Save the state to history
+            self.chat_history.append({"role": "assistant", "content": final_state.summary})
+            
+        except Exception as e:
+            agent_message.update(f"**Agent [Error]:** {str(e)}")
+            tool_log.write(f"[bold red]System Error:[/bold red] {str(e)}")
+            
+        finally:
+            chat_scroll.scroll_end(animate=False)
 
 if __name__ == "__main__":
     app = AgentOrchestratorApp()

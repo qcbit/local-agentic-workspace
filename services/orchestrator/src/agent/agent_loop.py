@@ -7,12 +7,12 @@ import logging
 import operator
 import os
 from pathlib import Path
-from rag.vector_store import LocalVectorStore
+from services.orchestrator.src.rag.vector_store import LocalVectorStore
 from services.orchestrator.src.memory.context_manager import SlidingContextManager
 import shlex
 import subprocess
 import time
-from typing import List, Dict, Any, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 import urllib.request
 import urllib.error
 
@@ -115,11 +115,11 @@ def evaluate_math_expression(expression: str):
 class ToolDispatcher:
     """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
     
-    def __init__(self, uds_server=None, workspace_root: str = None):
+    def __init__(self, uds_server=None, workspace_root: Optional[str] = None, permission_callback=None):
         self.uds_server = uds_server
         # Default to current directory if not provided
         self.workspace_root = workspace_root or os.getcwd() 
-        
+        self.permission_callback = permission_callback # Store the UI callback
         # Strict deny-list for highly destructive or interactive commands
         self.shell_deny_list = [
             "rm", "sudo", "mkfs", "fdisk", "dd", "chown", "chmod", 
@@ -207,6 +207,19 @@ class ToolDispatcher:
              return f"SECURITY VIOLATION: Command execution blocked. '{command}' contains forbidden keywords."
             
         # TIER 3: Shell commands (Requires Explicit Modal Confirmation)
+        # 2. Prefer the local TUI permission callback over the UDS server
+        if self.permission_callback:
+            print(f"⏸️  [Proxy] Requesting TUI permission for '{command}'...")
+            # Wait for the user to click Approve/Deny in the terminal UI
+            is_approved = await self.permission_callback(f"Allow shell execution:\n\n{command}")
+            
+            if is_approved:
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=os.getcwd())
+                output = result.stdout if result.returncode == 0 else result.stderr
+                return f"Command exit code {result.returncode}.\nOutput:\n{output}"
+            else:
+                return "Action Blocked: The user denied the shell execution request."
+
         if not self.uds_server:
             return "Error: Cannot request shell permission. IPC Server not attached."
             
@@ -336,13 +349,17 @@ class ToolRegistry:
 class Agent:
     """The central state machine managing the ReAct loop."""
 
-    def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None, workspace_root: str = None):
+    def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None, workspace_root: Optional[str] = None, permission_callback=None):
         self.llm_provider = llm_provider
         self.uds_server = uds_server
         self.workspace_root = workspace_root or os.getcwd()
         
         # Pass the workspace_root down to the dispatcher
-        self.dispatcher = ToolDispatcher(uds_server=uds_server, workspace_root=self.workspace_root)        
+        self.dispatcher = ToolDispatcher(
+            uds_server=uds_server, 
+            workspace_root=self.workspace_root,
+            permission_callback=permission_callback
+        )      
         self.tool_registry = ToolRegistry(uds_server=uds_server)
         self.max_iterations = 10
         
@@ -355,9 +372,11 @@ class Agent:
             llm_provider=self.llm_provider,
         )
 
-    def reason(self, context: List[Dict[str, str]]) -> Dict[str, Any]:
+    async def reason(self, context: List[Dict[str, str]]) -> Dict[str, Any]:
         """Invokes the LLM and parses the structured JSON response."""
-        raw_response = self.llm_provider.generate(context)
+
+        # OFF-LOAD TO THREAD: Prevents freezing the Textual UI
+        raw_response = await asyncio.to_thread(self.llm_provider.generate,context)
         print(f"🧠 [Reasoning] LLM Output:\n{raw_response}")
         
         try:
@@ -370,13 +389,21 @@ class Agent:
             }
 
     # 2. Make the run method ASYNC so we can await the IPC socket tools
-    async def run(self, user_goal: str) -> AgentState:
+    async def run(self, user_goal: str, ui_callback=None) -> AgentState:
         """The Main Agent Loop: Context -> Reason -> Tool -> Observation -> State Update."""
+
+        # Helper function to print to terminal AND the Textual UI
+        def log(msg: str):
+            if ui_callback:
+                ui_callback(msg)
+            else:
+                print(msg)
+
         state = AgentState(user_goal=user_goal)
-        print(f"🚀 --- Starting Agent Loop ---\nGoal: {user_goal}")
+        log(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
 
         while not state.is_complete and state.iterations < state.max_iterations:
-            print(f"\n🔄 --- Iteration {state.iterations + 1} ---")
+            log(f"\n[dim]🔄 --- Iteration {state.iterations + 1} ---[/dim]")
             
             # Fetch dynamically from our properly named tool_registry
             tool_descriptions = "\n".join([f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()])
@@ -415,7 +442,7 @@ class Agent:
             """
             
             context = self.memory.build_safe_context(state, system_prompt)
-            llm_response = self.reason(context)
+            llm_response = await self.reason(context)
 
             if self.uds_server:
                 reasoning_text = llm_response.get("reasoning", "...")
@@ -429,14 +456,28 @@ class Agent:
             tool_name = llm_response.get("tool", "unknown")
             tool_args = llm_response.get("tool_args", {})
 
+            # If the LLM got lazy and returned a string instead of a dict
+            if isinstance(tool_args, str):
+                log(f"[dim]⚠️ Auto-correcting malformed tool_args string into a dictionary...[/dim]")
+                if tool_name == "terminal_proxy":
+                    tool_args = {"command": tool_args}
+                elif tool_name == "math_operation":
+                    tool_args = {"expression": tool_args}
+                else:
+                    tool_args = {} # Fallback
+
+            reasoning = llm_response.get("reasoning", "No reasoning provided.")
+
+            log(f"[bold magenta]🧠 [Reasoning][/bold magenta] {reasoning}")
+            log(f"[bold yellow]🔧 [Dispatching][/bold yellow] {tool_name} with args: {tool_args}")
+
             if tool_name == "finish_task":
                 state.is_complete = True
                 summary = tool_args.get("summary", "Task completed successfully.")
-                print(f"✅ [Observation] {summary}")
-                
+                log(f"[bold green]✅ [Task Complete][/bold green] {summary}")
+
                 # Actually save the summary to the state so the server can return it
                 state.summary = summary 
-                
                 state.history.append(Message(role=Role.TOOL, content=summary, name=tool_name))
                 break
 
@@ -448,8 +489,8 @@ class Agent:
                 # Execute original synchronous tools (terminal_proxy, file_system)
                 observation = await self.dispatcher.execute_async(tool_name, tool_args)                
 
-            print(f"👀 [Observation] {observation}")
-            
+            log(f"[bold blue]👀 [Observation][/bold blue]\n{observation}")
+
             if tool_name == "error" and "Connection Error" in str(llm_response.get("reasoning", "")):
                 print("🛑 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
                 break
