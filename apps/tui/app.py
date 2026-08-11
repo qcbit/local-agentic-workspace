@@ -7,7 +7,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Header, Footer, Input, Label, Markdown, RichLog
+from textual.widgets import Button, Header, Footer, Input, Label, Markdown, RichLog, Switch
 from typing import AsyncGenerator
 
 # Set up file logging
@@ -146,6 +146,17 @@ class AgentOrchestratorApp(App):
     .message {
         margin-bottom: 1;
     }
+
+    #toggle-container {
+        height: 3;
+        align: left middle;
+        padding-left: 1;
+    }
+    
+    #toggle-label {
+        margin-left: 1;
+        content-align: center middle;
+    }
     """
 
     def __init__(self, *args, **kwargs):
@@ -180,6 +191,9 @@ class AgentOrchestratorApp(App):
             # Left side: Streaming Conversation
             with Vertical(id="chat-pane"):
                 yield VerticalScroll(id="chat-scroll")
+                with Horizontal(id="toggle-container"):
+                    yield Switch(id="auto-approve-toggle")
+                    yield Label("Autonomous Mode (Auto-Approve)", id="toggle-label")
                 yield Input(placeholder="Ask the agent to run a math_operation or auto-fix a command...", id="chat-input")
             
             # Right side: Tool Logs
@@ -200,6 +214,9 @@ class AgentOrchestratorApp(App):
             
         event.input.value = "" 
         
+        # Check the UI toggle state
+        is_auto = self.query_one("#auto-approve-toggle", Checkbox).value
+
         # 1. Update application state
         self.chat_history.append({"role": "user", "content": user_text})
         
@@ -208,10 +225,10 @@ class AgentOrchestratorApp(App):
         chat_scroll.mount(Markdown(f"**You:** {user_text}", classes="message"))
         
         # Trigger the async orchestrator tasks
-        self.process_agent_turn(user_text)
+        self.process_agent_turn(user_text, is_auto)
 
     @work(exclusive=True)
-    async def process_agent_turn(self, prompt: str) -> None:
+    async def process_agent_turn(self, prompt: str, auto_approve: bool) -> None:
         """Handles the agent execution loop and streams logs to the UI."""
         chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
         tool_log = self.query_one("#tool-log", RichLog)
@@ -243,7 +260,7 @@ class AgentOrchestratorApp(App):
         
         try:
             # 4. Await the execution loop, passing in the ui_logger
-            final_state = await agent.run(prompt, ui_callback=ui_logger)
+            final_state = await agent.run(prompt, ui_callback=ui_logger, auto_approve=auto_approve)
             
             # 5. When the loop hits 'finish_task', update the chat pane with the final summary
             agent_message.update(f"**Agent:** {final_state.summary}")

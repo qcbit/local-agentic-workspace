@@ -7,6 +7,7 @@ import logging
 import operator
 import os
 from pathlib import Path
+import re
 from services.orchestrator.src.rag.vector_store import LocalVectorStore
 from services.orchestrator.src.memory.context_manager import SlidingContextManager
 import shlex
@@ -127,14 +128,14 @@ class ToolDispatcher:
             "nano", "vim", "top", "history"
         ]
 
-    async def execute_async(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        print(f"🔧 [Tool Call] Dispatching '{tool_name}' with args: {arguments}")
+    async def execute_async(self, tool_name: str, arguments: Dict[str, Any], auto_approve: bool = False) -> str:
+        print(f"🔧 [Tool Call] Dispatching '{tool_name}' with args: {arguments} (Auto-Approve: {auto_approve})")
         
         try:
             if tool_name == "file_system":
-                return await self._handle_file_system_async(arguments)
+                return await self._handle_file_system_async(arguments, auto_approve=auto_approve)
             elif tool_name == "terminal_proxy":
-                return await self._handle_terminal_proxy_async(arguments)
+                return await self._handle_terminal_proxy_async(arguments, auto_approve=auto_approve)
             elif tool_name == "finish_task":
                 return "Task marked as complete by the agent."
             else:
@@ -142,7 +143,7 @@ class ToolDispatcher:
         except Exception as e:
             return f"Error executing {tool_name}: {str(e)}"
 
-    async def _handle_file_system_async(self, args: Dict[str, Any]) -> str:
+    async def _handle_file_system_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
         action = args.get("action")
         path = args.get("path", ".")
         
@@ -165,6 +166,13 @@ class ToolDispatcher:
         # TIER 2: File writes (Requires VS Code Staged Diff Approval)
         elif action == "write":
             content = args.get("content", "")
+
+            # 🚀 AUTO-APPROVE BYPASS
+            if auto_approve:
+                print(f"⚡ [Auto-Approve] Silently writing to '{path}'...")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return f"Successfully wrote to file '{path}'."
             
             if not self.uds_server:
                 return "Error: Cannot request write permission. IPC Server not attached."
@@ -189,23 +197,36 @@ class ToolDispatcher:
         
         return f"Error: Unsupported file system action '{action}'."
 
-    async def _handle_terminal_proxy_async(self, args: Dict[str, Any]) -> str:
+    async def _handle_terminal_proxy_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
         command = args.get("command")
         if not command:
             return "Error: No command provided."
             
-        # Sandbox Check
+        # 🛡️ 1. SANDBOX CHECK (Always runs)
         is_safe, error_msg = validate_terminal_command(self.workspace_root, command)
         if not is_safe:
             logger.warning(f"🔒 [Sandbox Blocked] Command: '{command}'")
             return error_msg  # Fed back to LLM as observation
 
-        # Pre-execution Deny-List Check
+        # 🛡️ 2. CRUCIAL SAFEGUARD: DENY-LIST CHECK (Always runs)
         command_lower = command.lower()
         if any(forbidden in command_lower.split() for forbidden in self.shell_deny_list):
             # Return a strict security violation observation payload
              return f"SECURITY VIOLATION: Command execution blocked. '{command}' contains forbidden keywords."
             
+        # 🚀 AUTO-APPROVE BYPASS
+        if auto_approve:
+            print(f"⚡ [Auto-Approve] Silently executing '{command}'...")
+            result = subprocess.run(
+                command, 
+                shell=True, 
+                capture_output=True, 
+                text=True, 
+                cwd=self.workspace_root
+            )
+            output = result.stdout if result.returncode == 0 else result.stderr
+            return f"Command exit code {result.returncode}.\nOutput:\n{output}"
+
         # TIER 3: Shell commands (Requires Explicit Modal Confirmation)
         # 2. Prefer the local TUI permission callback over the UDS server
         if self.permission_callback:
@@ -214,7 +235,7 @@ class ToolDispatcher:
             is_approved = await self.permission_callback(f"Allow shell execution:\n\n{command}")
             
             if is_approved:
-                result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=os.getcwd())
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=self.workspace_root)
                 output = result.stdout if result.returncode == 0 else result.stderr
                 return f"Command exit code {result.returncode}.\nOutput:\n{output}"
             else:
@@ -238,7 +259,7 @@ class ToolDispatcher:
                 shell=True, 
                 capture_output=True, 
                 text=True, 
-                cwd=os.getcwd()
+                cwd=self.workspace_root
             )
             output = result.stdout if result.returncode == 0 else result.stderr
             return f"Command exit code {result.returncode}.\nOutput:\n{output}"
@@ -378,18 +399,24 @@ class Agent:
         # OFF-LOAD TO THREAD: Prevents freezing the Textual UI
         raw_response = await asyncio.to_thread(self.llm_provider.generate,context)
         print(f"🧠 [Reasoning] LLM Output:\n{raw_response}")
+
+        # Try to find the first JSON object in the string using regex
+        match = re.search(r'\{.*\}', raw_response, re.DOTALL)
         
-        try:
-            return json.loads(raw_response)
-        except json.JSONDecodeError:
-            return {
-                "reasoning": "Failed to parse JSON from LLM output.", 
-                "tool": "error", 
-                "tool_args": {"raw": raw_response}
-            }
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass # Fall through to the error handler below
+           
+        return {
+            "reasoning": "Failed to parse JSON. Remember to output ONLY a single valid JSON object.", 
+            "tool": "error", 
+            "tool_args": {"raw": raw_response}
+        }
 
     # 2. Make the run method ASYNC so we can await the IPC socket tools
-    async def run(self, user_goal: str, ui_callback=None) -> AgentState:
+    async def run(self, user_goal: str, ui_callback=None, auto_approve: bool = False) -> AgentState:
         """The Main Agent Loop: Context -> Reason -> Tool -> Observation -> State Update."""
 
         # Helper function to print to terminal AND the Textual UI
@@ -487,7 +514,7 @@ class Agent:
                 observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
             else:
                 # Execute original synchronous tools (terminal_proxy, file_system)
-                observation = await self.dispatcher.execute_async(tool_name, tool_args)                
+                observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=auto_approve)                
 
             log(f"[bold blue]👀 [Observation][/bold blue]\n{observation}")
 
