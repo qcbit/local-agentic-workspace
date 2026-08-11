@@ -50,8 +50,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(async (data) => {
             if (data.command === 'executeTask') {
                 try {
-                    const result = await this._udsClient.request('execute_agent_task', { goal: data.goal });
-                    
+                    // Map the React state (autoApprove) to the Python expected key (auto_approve)
+                    const payload = {
+                        goal: data.goal,
+                        auto_approve: data.autoApprove 
+                    };
+                    const result = await this._udsClient.request('execute_agent_task', payload);
+
                     // Parse agent observation to string
                     let responseText = "Task completed.";
                     if (result && result.final_observation) {

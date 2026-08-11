@@ -339,7 +339,7 @@ class JsonRpcUdsServer:
             uds_server=self, 
             workspace_root=project_root  # Inject the global root here
         )
-        state = await agent.run(goal)
+        state = await agent.run(goal, auto_approve=auto_approve)
         return state
 
     def _success_response(self, req_id: Any, result: Any) -> Dict[str, Any]:

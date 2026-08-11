@@ -9,6 +9,7 @@ export const ChatPanel: React.FC = () => {
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<{ role: string, content: string }[]>([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [isAutoApprove, setIsAutoApprove] = useState(false);
 
     // Listen for IPC responses routed from the Python orchestrator
     useEffect(() => {
@@ -36,7 +37,8 @@ export const ChatPanel: React.FC = () => {
         // Dispatch command to the Extension Host
         vscode.postMessage({
             command: 'executeTask',
-            goal: input
+            goal: input,
+            autoApprove: isAutoApprove
         });
         
         setInput('');
@@ -68,6 +70,15 @@ export const ChatPanel: React.FC = () => {
             </div>
             
             <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', borderTop: '1px solid var(--vscode-widget-border)' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-foreground)', fontSize: '12px', cursor: 'pointer' }}>
+                    <input 
+                        type="checkbox" 
+                        checked={isAutoApprove}
+                        onChange={(e) => setIsAutoApprove(e.target.checked)}
+                        style={{ margin: 0 }}
+                    />
+                    Auto-Approve
+                </label>
                 <input 
                     type="text" 
                     value={input}
