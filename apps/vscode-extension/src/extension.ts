@@ -319,7 +319,7 @@ export function activate(context: vscode.ExtensionContext) {
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Failed to sync settings: ${error.message}`);
                 }
-            }
+            } 
         });
     });
     context.subscriptions.push(disposableSettings);

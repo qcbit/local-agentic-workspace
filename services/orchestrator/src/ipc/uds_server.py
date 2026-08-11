@@ -244,11 +244,16 @@ class JsonRpcUdsServer:
                 goal = params.get("goal")
                 if not goal:
                     return self._error_response(req_id, -32602, "Invalid params: 'goal' is required")
-                
+
+                # 1. Extract the flag from the VS Code payload (default to False)
+                is_auto_approve = params.get("auto_approve", False)
+                if is_auto_approve:
+                    logger.info("⚡ [Agent Execution] Auto-approve is enabled. Agent will execute without user confirmation.")
+
                 logger.info(f"🧠 [Agent Execution] Starting task: {goal}")
                 
                 try:
-                    result_state = await self._run_agent_async(goal)
+                    result_state = await self._run_agent_async(goal, auto_approve=is_auto_approve)
                     
                     # Extract final observation
                     final_observation = "Task failed or max iterations reached."
@@ -304,7 +309,7 @@ class JsonRpcUdsServer:
 
         return {"status": "success", "indexed_path": file_path}
 
-    async def _run_agent_async(self, goal: str):
+    async def _run_agent_async(self, goal: str, auto_approve: bool = False):
         """Asynchronously instantiates and runs the agent."""
         
         # 1. Determine which profile is active
@@ -334,7 +339,7 @@ class JsonRpcUdsServer:
             uds_server=self, 
             workspace_root=project_root  # Inject the global root here
         )
-        state = await agent.run(goal)
+        state = await agent.run(goal, auto_approve=auto_approve)
         return state
 
     def _success_response(self, req_id: Any, result: Any) -> Dict[str, Any]:
