@@ -159,6 +159,15 @@ class ToolDispatcher:
             elif os.path.isfile(path):
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
+                # --- Protect the Context Window ---
+                max_chars = 4000 
+                if len(content) > max_chars:
+                    return (
+                        f"File content of '{path}' (TRUNCATED - File is too large):\n"
+                        f"{content[:max_chars]}\n\n"
+                        f"...[TRUNCATED]... The file is too large to read entirely. "
+                        f"You MUST use the 'search_codebase' tool to query specific parts of this file."
+                    )    
                 return f"File content of '{path}':\n{content}"
             else:
                 return f"Error: Path '{path}' does not exist."

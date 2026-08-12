@@ -38,6 +38,22 @@ class LocalVectorStore:
         self.embedder = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
     
+    def _chunk_text(self, text: str, chunk_size: int = 1200, chunk_overlap: int = 200) -> list[str]:
+        """Splits text into overlapping chunks to fit within LLM context limits."""
+        if not text:
+            return []
+        
+        chunks = []
+        start = 0
+        text_length = len(text)
+        
+        while start < text_length:
+            end = start + chunk_size
+            chunks.append(text[start:end])
+            # Step forward by chunk_size, minus the overlap to preserve context between chunks
+            start += chunk_size - chunk_overlap 
+            
+        return chunks
 
     def _initialize_table(self):
         """Creates the LanceDB table with a strict PyArrow schema if it doesn't exist."""
@@ -62,30 +78,40 @@ class LocalVectorStore:
 
     # Inside LocalVectorStore class in vector_store.py
     def upsert_file(self, file_path: str, file_hash: str, content: str):
-        # 1. Generate the embedding
-        try:
-            # FastEmbed expects a list of strings
-            vector = self._generate_embedding(content)
-        except Exception as e:
-            logger.error(f"Failed to generate embedding for {file_path}: {e}")
+        # 1. Split the massive file into bite-sized chunks
+        text_chunks = self._chunk_text(content)
+        
+        if not text_chunks:
             return
 
-        # 2. Format the data explicitly to match our PyArrow schema
-        data = [{
-            "vector": vector,
-            "file_path": file_path,
-            "file_hash": file_hash,
-            "content": content
-        }]
+        data_to_insert = []
         
-        # 3. Upsert into LanceDB
-        try:
-            # We use mode="append" assuming we want to add new chunks, 
-            # or you can use LanceDB's merge capabilities if you need to deduplicate.
-            self.table.add(data) 
-            logger.info(f"✅ Indexed chunk for {file_path}")
-        except Exception as e:
-            logger.error(f"Failed to insert into LanceDB: {e}")
+        # 2. Process each chunk
+        for chunk in text_chunks:
+            try:
+                # Generate the embedding for the specific chunk
+                vector = self._generate_embedding(chunk)
+                
+                # Format the data explicitly to match your PyArrow schema
+                data_to_insert.append({
+                    "vector": vector,
+                    "file_path": file_path,
+                    "file_hash": file_hash,
+                    "content": chunk
+                })
+            except Exception as e:
+                logger.error(f"Failed to generate embedding for chunk in {file_path}: {e}")
+                continue # Skip the broken chunk and move to the next
+
+        # 3. Upsert the batch into LanceDB
+        if data_to_insert:
+            try:
+                # We use mode="append" assuming we want to add new chunks, 
+                # or you can use LanceDB's merge capabilities if you need to deduplicate.
+                self.table.add(data_to_insert) 
+                logger.info(f"✅ Indexed {len(data_to_insert)} chunks for {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to insert into LanceDB: {e}")
 
     def semantic_search(self, query: str, limit: int = 5):
         if not hasattr(self, 'table'):
