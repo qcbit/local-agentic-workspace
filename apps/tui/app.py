@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import os
 import pyperclip
 from services.orchestrator import Agent, OllamaProxyProvider
 from textual import work, on
@@ -215,7 +217,7 @@ class AgentOrchestratorApp(App):
         event.input.value = "" 
         
         # Check the UI toggle state
-        is_auto = self.query_one("#auto-approve-toggle", Checkbox).value
+        is_auto = self.query_one("#auto-approve-toggle", Switch).value
 
         # 1. Update application state
         self.chat_history.append({"role": "user", "content": user_text})
@@ -247,15 +249,36 @@ class AgentOrchestratorApp(App):
         agent_message = Markdown("**Agent:** Thinking... ⏳", classes="message")
         await chat_scroll.mount(agent_message)
         chat_scroll.scroll_end(animate=False)
+
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
         
+        active_config = {}
+        target_model = "llama3:8b" # fallback default
+        
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                full_config = json.load(f)
+                active_profile_name = full_config.get("active_profile", "home")
+                active_config = full_config.get("profiles", {}).get(active_profile_name, {})
+                
+                # Extract the model specifically for the provider
+                target_model = active_config.get("llm", {}).get("model_name", target_model)
+                
+                ui_logger(f"[dim]⚙️ Loaded '{active_profile_name}' profile from config.json[/dim]")
+        except Exception as e:
+            ui_logger(f"[bold yellow]⚠️ Failed to load config.json: {e}. Using defaults.[/bold yellow]")
+
         # 3. Initialize your real backend
         llm = OllamaProxyProvider(
-            # endpoint_url="http://localhost:11434/v1/chat/completions",
+            model=target_model,
         )
+
         agent = Agent(
             llm_provider=llm, 
-            config={},
-            permission_callback=ask_permission
+            config=active_config,
+            permission_callback=ask_permission,
+            workspace_root=project_root
         )
         
         try:

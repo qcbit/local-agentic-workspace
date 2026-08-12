@@ -400,9 +400,21 @@ class Agent:
         raw_response = await asyncio.to_thread(self.llm_provider.generate,context)
         print(f"🧠 [Reasoning] LLM Output:\n{raw_response}")
 
+        clean_response = raw_response.strip()
+
+        # 1. Strip markdown code block formatting if the LLM hallucinated it
+        markdown_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', clean_response, re.DOTALL)
+        if markdown_match:
+            clean_response = markdown_match.group(1)
+
+        # 2. Try parsing the cleaned response directly
+        try:
+            return json.loads(clean_response)
+        except json.JSONDecodeError:
+            pass
+
         # Try to find the first JSON object in the string using regex
         match = re.search(r'\{.*\}', raw_response, re.DOTALL)
-        
         if match:
             try:
                 return json.loads(match.group(0))
@@ -452,9 +464,12 @@ class Agent:
             Your output must be a single JSON object with EXACTLY these keys: "reasoning" (string), "tool" (string), and "tool_args" (dictionary). 
             
             CRITICAL RULES:
+            - YOUR CURRENT WORKING DIRECTORY IS: {self.workspace_root}
+            - When using the 'file_system' tool, you MUST use the exact paths provided by your context tools relative to this directory. Do not guess or modify paths.
             - If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}
             - Never use Python-style 'None'. Use strict JSON only.
             - NEVER invent, hallucinate, or call tools that are not explicitly listed above. 
+            - NEVER wrap your JSON in markdown code blocks (\``json). - You MUST provide all required arguments for the tool you select. Never send an empty dictionary unless the tool requires no arguments.`
             - Once you have achieved the user's goal based on the observations, you MUST IMMEDIATELY call 'finish_task'. Do not explore further.
             - The 'summary' argument in 'finish_task' is the ONLY information the user will see. You MUST include the actual results, lists, code, or data requested by the user in this summary. Never just say "task complete".
 
@@ -544,7 +559,10 @@ class OllamaProxyProvider:
     def generate(self, context: List[Dict[str, str]], require_json: bool = True) -> Optional[str]:
         payload = {
             "model": self.model,
-            "messages": context
+            "messages": context,
+            "options": {
+                "num_ctx": 8192  # Expands the context window for heavy RAG injections
+            }
         }
         if require_json:
             payload["format"] = "json"
