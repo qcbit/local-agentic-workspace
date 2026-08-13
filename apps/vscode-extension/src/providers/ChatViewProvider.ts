@@ -46,6 +46,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             </html>
         `;
 
+        // Listen for the agent's inner monologue from the Unix Socket
+        this._udsClient.on('agentThinking', (message: string) => {
+            if (this._view) {
+                // Pipe the thought directly to the React frontend
+                this._view.webview.postMessage({ 
+                    command: 'agentThinking', 
+                    text: message 
+                });
+            }
+        });
+
         // Listen for the prompt from React, send it to Python via IPC
         webviewView.webview.onDidReceiveMessage(async (data) => {
             if (data.command === 'executeTask') {
