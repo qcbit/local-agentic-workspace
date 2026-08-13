@@ -83,7 +83,7 @@ class JsonRpcUdsServer:
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Reads incoming streams, dispatches JSON-RPC requests, and writes responses."""
-        self.active_writer = writer
+
         try:
             while True:
                 data = await reader.readline()
@@ -97,6 +97,12 @@ class JsonRpcUdsServer:
                     continue
                     
                 req = json.loads(payload)
+
+                # --- Smart Client Routing ---
+                # Only designate the connection as the VS Code Extension Host if it sends editor-specific commands.
+                # The TUI will never send these, preventing it from stealing the context connection.
+                if req.get("method") in ["sync_file", "update_config", "get_config", "ping"]:
+                    self.active_writer = writer
 
                 # Is this an unprompted notification from VS Code? (Has method, no ID)
                 if "method" in req and "id" not in req:
@@ -133,7 +139,10 @@ class JsonRpcUdsServer:
         except Exception as e:
             logger.error(f"Client connection error: {e}")
         finally:
-            self.active_writer = None
+            # --- Safe Disconnect ---
+            # Only clear the active writer if the disconnecting client IS the active writer
+            if self.active_writer == writer:
+                self.active_writer = None
             writer.close()
             await writer.wait_closed()
 
