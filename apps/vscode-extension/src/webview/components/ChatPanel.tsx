@@ -10,17 +10,28 @@ export const ChatPanel: React.FC = () => {
     const [messages, setMessages] = useState<{ role: string, content: string }[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isAutoApprove, setIsAutoApprove] = useState(false);
+    
+    // 1. Moved state INSIDE the component
+    const [currentThought, setCurrentThought] = useState<string>("");
 
     // Listen for IPC responses routed from the Python orchestrator
     useEffect(() => {
         const handler = (event: MessageEvent) => {
             const message = event.data;
-            if (message.command === 'agentResponse') {
+            
+            // 2. Merged the agentThinking listener into your existing handler
+            if (message.command === 'agentThinking') {
+                setCurrentThought(message.text);
+            } 
+            else if (message.command === 'agentResponse') {
                 setMessages(prev => [...prev, { role: 'agent', content: message.text }]);
                 setIsLoading(false);
-            } else if (message.command === 'agentError') {
+                setCurrentThought(""); // Clear the thought when finished
+            } 
+            else if (message.command === 'agentError') {
                 setMessages(prev => [...prev, { role: 'error', content: message.text }]);
                 setIsLoading(false);
+                setCurrentThought(""); // Clear the thought on error
             }
         };
         window.addEventListener('message', handler);
@@ -33,6 +44,7 @@ export const ChatPanel: React.FC = () => {
         // Render user message immediately
         setMessages(prev => [...prev, { role: 'user', content: input }]);
         setIsLoading(true);
+        setCurrentThought("Initializing..."); // Set an initial loading state
         
         // Dispatch command to the Extension Host
         vscode.postMessage({
@@ -66,7 +78,13 @@ export const ChatPanel: React.FC = () => {
                         {msg.role === 'error' ? '❌ ' : ''}{msg.content}
                     </div>
                 ))}
-                {isLoading && <div style={{ alignSelf: 'flex-start', opacity: 0.7, fontStyle: 'italic' }}>Agent is reasoning...</div>}
+                
+                {/* 3. Replaced your generic loading text with the dynamic thought stream */}
+                {isLoading && currentThought && (
+                    <div style={{ alignSelf: 'flex-start', opacity: 0.7, fontStyle: 'italic', padding: '8px 12px' }}>
+                        <span className="spinner">🌀</span> {currentThought}
+                    </div>
+                )}
             </div>
             
             <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', borderTop: '1px solid var(--vscode-widget-border)' }}>

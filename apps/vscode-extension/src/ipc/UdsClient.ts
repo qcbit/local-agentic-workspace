@@ -1,10 +1,11 @@
+import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-export class UdsClient {
+export class UdsClient extends EventEmitter {
     private client: net.Socket | null = null;
     private buffer: string = '';
     private pendingRequests: Map<number, { resolve: Function, reject: Function }> = new Map();
@@ -12,6 +13,7 @@ export class UdsClient {
     private socketPath: string;
 
     constructor() {
+        super();
         // Universally accessible location that both Node and Python can reach
         this.socketPath = '/tmp/agent.sock';
     }
@@ -58,6 +60,14 @@ export class UdsClient {
             try {
                 const msg = JSON.parse(message);
                 
+                if (msg.method && msg.id === undefined) {
+                    if (msg.method === "agent_status") {
+                        // Broadcast the agent's thought to the rest of the extension
+                        this.emit('agentThinking', msg.params?.message);
+                    }
+                    continue; // Skip the reverse-request logic
+                }
+
                 // 1. REVERSE-REQUEST LOGIC: Is Python asking Node.js for data or permission?
                 if (msg.method) {
                     // Handle the request asynchronously so we don't block the socket stream
