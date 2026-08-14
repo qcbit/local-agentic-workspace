@@ -1,30 +1,95 @@
-import * as vscode from 'vscode';
-import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
+import * as os from 'os';
+import * as path from 'path';
+import * as vscode from 'vscode';
 import { ASTProvider } from './ast/ASTProvider';
+import { AgentApprovalCodeLensProvider } from './codelens';
 import { AgenticDiffProvider } from './providers/DiffProvider';
+import { ChatViewProvider } from './providers/ChatViewProvider';
+import { spawn, ChildProcess } from 'child_process';
 import { UdsClient } from './ipc/UdsClient';
 import { WarpProxyServer } from './proxy/WarpProxyServer';
-import { ChatViewProvider } from './providers/ChatViewProvider';
-import { AgentApprovalCodeLensProvider } from './codelens';
 
 let udsClient: UdsClient;
 let proxyServer: WarpProxyServer;
 let statusBarItem: vscode.StatusBarItem;
+let backendProcess: ChildProcess | undefined;
 const codeLensProvider = new AgentApprovalCodeLensProvider();
 
 export function activate(context: vscode.ExtensionContext) {
+    const backendChannel = vscode.window.createOutputChannel('Local Agentic Backend');
+    context.subscriptions.push(backendChannel);
+
+    const platform = os.platform();
+    const arch = os.arch();
+
+    let binaryName = 'uds_server-linux-x64'; // Fallback
+    if (platform === 'darwin' && arch === 'arm64') {
+        binaryName = 'uds_server-macos-arm64';
+    } else if (platform === 'darwin' && arch === 'x64') {
+        binaryName = 'uds_server-macos-x64';
+    } else if (platform === 'win32') {
+        binaryName = 'uds_server-win-x64.exe';
+    }
+
+    // Safely determine the active workspace path, or fallback to the user's home directory
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const activeWorkspace = workspaceFolders ? workspaceFolders[0].uri.fsPath : os.homedir();
+
+    // Failsafe: Nuke the orphaned socket if it exists from a previous run
+    const socketPath = '/tmp/agent.sock';
+    if (fs.existsSync(socketPath)) {
+        console.log('🧹 Cleaning up orphaned UDS socket...');
+        fs.unlinkSync(socketPath);
+    }
+
+    backendChannel.appendLine(`🚀 Spawning backend binary: ${binaryName}`);
+
+    // Spawn the binary
+    // Resolve the absolute path to the binary shipped inside your extension's "bin" folder
+    const binaryPath = path.join(context.extensionPath, 'bin', binaryName);
+    backendProcess = spawn(binaryPath);
+
+
+    // USE #1: Capture Standard Output (The Agent's Thoughts)
+    // Spawn the binary and force it to run inside that directory
+    backendProcess = spawn(binaryPath, [], {
+        cwd: activeWorkspace
+    });
+
+    // USE #2: Capture Standard Error (Python crashes, tracebacks)
+    backendProcess.stderr?.on('data', (data) => {
+        backendChannel.append(`[ERROR] ${data.toString()}`);
+    });
+
+    // USE #3: Process Monitoring
+    backendProcess.on('close', (code) => {
+        backendChannel.appendLine(`\n⚠️ Backend process exited with code ${code}`);
+        // Optional: Trigger a VS Code notification so the user knows it crashed
+        vscode.window.showErrorMessage(`Agent backend crashed (Code ${code}). Please reload the window.`);
+    });
+    
+    backendProcess.on('error', (err) => {
+        backendChannel.appendLine(`\n❌ Failed to start backend: ${err.message}`);
+    });
+
     console.log('Local Agentic Workspace extension is now active.');
 
-    // 1. Initialize and connect the IPC Client
+    // NOW that the process is booting up, connect the IPC client
     udsClient = new UdsClient();
-    udsClient.connect().then(() => {
-        // Trigger background initial indexing on project load
-        indexWorkspaceOnLoad(udsClient);
-    }).catch(err => {
-        vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
-    });
+    
+    // (You will want a slight delay or retry-loop here so the binary has 
+    // time to boot up and create the socket file before UdsClient connects)
+    // 1. Initialize and connect the IPC Client
+    connectWithRetry(udsClient)
+        .then(() => {
+            // Trigger background initial indexing on project load
+            indexWorkspaceOnLoad(udsClient);
+        })
+        .catch(err => {
+            vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
+        });
 
     // ---------------------------------------------------------
     // PROACTIVE AI: Terminal Error Watcher
@@ -494,4 +559,28 @@ export function deactivate() {
     if (proxyServer) {
         proxyServer.stop();
     }
+    // Kill the phantom binary!
+    if (backendProcess && !backendProcess.killed) {
+        console.log('Terminating backend process...');
+        backendProcess.kill(); 
+    }
+}
+
+async function connectWithRetry(client: UdsClient, retries = 20, delayMs = 500): Promise<void> {
+    for (let i = 0; i < retries; i++) {
+        try {
+            await client.connect();
+            console.log('✅ Successfully connected to UDS socket.');
+            return; 
+        } catch (err: any) {
+            // If the file doesn't exist yet, or the connection is refused, wait and try again
+            if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') {
+                console.log(`Socket not ready yet, retrying in ${delayMs}ms... (${i + 1}/${retries})`);
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+            } else {
+                throw err; // A real error occurred
+            }
+        }
+    }
+    throw new Error("Timeout waiting for Python orchestrator to initialize the socket.");
 }

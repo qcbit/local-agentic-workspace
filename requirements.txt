@@ -8,3 +8,4 @@ fastembed
 prompt_toolkit
 textual
 pyperclip
+pyinstaller

@@ -2,16 +2,20 @@
   "name": "local-agentic-workspace",
   "displayName": "Local Agentic Workspace",
   "version": "0.1.0",
+  "publisher": "Qcbit",
+  "author": "Lance Truong",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qcbit/local-agentic-workspace.git",
+    "directory": "apps/vscode-extension"
+  },
   "description": "Air-gapped local agentic coding assistant for VS Code",
-  "publisher": "local-dev",
   "engines": {
     "vscode": "^1.85.0"
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "*",
-    "onStartupFinished",
-    "onCommand:localAgentic.testAST"
   ],
   "contributes": {
     "configuration": {
@@ -67,11 +71,6 @@
         "category": "Local Agentic"
       },
       {
-        "command": "localAgentic.testAST",
-        "title": "LocalAgentic: testAST",
-        "category": "Local Agentic"
-      },
-      {
         "command": "localAgentic.showProposedDiff",
         "title": "LocalAgentic: Show Proposed Diff",
         "category": "Local Agentic"
@@ -108,10 +107,11 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./ && npm run build:webview",
+    "compile": "tsc --noEmit && npm run build:extension && npm run build:webview",
     "watch": "tsc -watch -p ./",
     "test": "mocha -r ts-node/register \"test/**/*.spec.ts\"",
-    "build:webview": "node esbuild.webview.js"
+    "build:webview": "node esbuild.webview.js",
+    "build:extension": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node"
   },
   "devDependencies": {
     "@types/chai": "^4.3.4",

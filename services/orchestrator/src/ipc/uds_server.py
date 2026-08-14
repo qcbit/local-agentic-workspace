@@ -27,8 +27,33 @@ project_root = str(Path(__file__).resolve().parent.parent.parent.parent.parent)
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+config_path = os.path.join(os.getcwd(), '.agentic_config.json')
+
+def load_config():
+        """Load config from the workspace, or create a default one if missing."""
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"WARNING - Error reading config: {e}")
+                
+        # Default configuration if the file doesn't exist yet
+        default_config = {
+            "model": "llama3",
+            "endpoint": "http://127.0.0.1:11434"
+        }
+        
+        # Save the defaults to the workspace so the user/UI can sync to it
+        save_config(default_config)
+        return default_config
+
+def save_config(new_config):
+    """Save the updated config to the workspace directory."""
+    with open(config_path, 'w') as f:
+        json.dump(new_config, f, indent=4)
 
 def deep_update(d, u):
     """Recursively merges dictionary 'u' into dictionary 'd'."""
@@ -39,7 +64,12 @@ def deep_update(d, u):
             d[k] = v
     return d
 
+def get_resource_path(relative_path: str) -> str:
+    """Get absolute path to resource, works for dev and for PyInstaller one-file binaries."""
+    # getattr safely checks for _MEIPASS without angering the linter
+    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
 
+    return os.path.join(base_path, relative_path)
 
 class JsonRpcUdsServer:
     """JSON-RPC 2.0 Server over Unix Domain Sockets."""
@@ -51,7 +81,7 @@ class JsonRpcUdsServer:
         else:
             self.socket_path = socket_path
             
-        self.config = self._load_config()
+        self.config = load_config()
 
         self.running = False
 
@@ -71,16 +101,7 @@ class JsonRpcUdsServer:
         """Registers an async callback for a specific incoming notification."""
         self.notification_handlers[method_name] = callback_coroutine
 
-    def _load_config(self) -> Dict[str, Any]:
-        """Loads the orchestrator configuration from disk."""
-        config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load config.json: {e}. Using defaults.")
-            return {}
-
+    
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Reads incoming streams, dispatches JSON-RPC requests, and writes responses."""
 
@@ -185,9 +206,7 @@ class JsonRpcUdsServer:
             return {"content": "Error: VS Code client timed out."}
 
     def handle_update_config(self, payload: dict):
-        # 1. Use the globally defined project_root to ensure consistency with _load_config
-        config_path = os.path.join(project_root, "services", "orchestrator", "config.json")
-        
+        # 1. Use the global config_path instead of the hardcoded project_root path
         logger.info(f"⚙️ Target config path: {config_path}")
 
         # 2. Load the existing config
@@ -196,7 +215,8 @@ class JsonRpcUdsServer:
                 config_data = json.load(f)
         except FileNotFoundError:
             logger.error(f"❌ Failed to locate config file at: {config_path}")
-            return {"error": f"config.json not found at {config_path}"}
+            # If it's missing we'll initialize an empty config to merge into
+            config_data = {}
         except Exception as e:
             logger.error(f"❌ Error reading config.json: {e}")
             return {"error": str(e)}
