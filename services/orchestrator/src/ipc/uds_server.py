@@ -343,18 +343,46 @@ class JsonRpcUdsServer:
         
         # 1. Determine which profile is active
         active_profile_name = self.config.get("active_profile", "home")
+        
+        # 2. Extract profiles and rigidly enforce that it MUST be a dictionary
         profiles = self.config.get("profiles", {})
-        active_config = profiles.get(active_profile_name, {})
+        if not isinstance(profiles, dict):
+            profiles = {}
+            
+        # 3. Safely extract the active config (fallback to the root dict if flat)
+        if not isinstance(active_profile_name, str):
+            active_profile_name = "home"
+            
+        active_config = profiles.get(active_profile_name, self.config)
+        if not isinstance(active_config, dict):
+            active_config = self.config
         
-        # 2. Extract LLM settings for this specific environment
-        llm_config = active_config.get("llm", {})
+        # 4. Extract LLM settings (fallback to active_config if 'llm' key is missing)
+        llm_config = active_config.get("llm", active_config)
+        if not isinstance(llm_config, dict):
+            llm_config = active_config
         
-        # Strictly pull from config.json (Ensure your JSON keys match these exactly)
-        endpoint = llm_config.get("endpoint_url")
-        model_name = llm_config.get("model_name") 
+        # 5. Bulletproof extraction: check for both the new and old UI keys
+        endpoint = (
+            llm_config.get("endpoint_url") or 
+            llm_config.get("endpoint") or 
+            self.config.get("endpoint_url") or 
+            self.config.get("endpoint")
+        )
         
+        model_name = (
+            llm_config.get("model_name") or 
+            llm_config.get("model") or 
+            self.config.get("model_name") or 
+            self.config.get("model")
+        )
+        
+        # 🛡️ Failsafe: Auto-correct naked Ollama URLs to the chat completions path
+        if endpoint and endpoint.endswith("11434"):
+            endpoint = f"{endpoint}/v1/chat/completions"
+
         if not endpoint or not model_name:
-            raise ValueError(f"Missing 'endpoint_url' or 'model_name' in config.json for profile '{active_profile_name}'")
+            raise ValueError(f"Missing endpoint or model in workspace config. Current config state: {self.config}")
         
         llm = OllamaProxyProvider(
             endpoint_url=endpoint,
