@@ -33,6 +33,10 @@ export function activate(context: vscode.ExtensionContext) {
         binaryName = 'uds_server-win-x64.exe';
     }
 
+    // Safely determine the active workspace path, or fallback to the user's home directory
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const activeWorkspace = workspaceFolders ? workspaceFolders[0].uri.fsPath : os.homedir();
+
     // Failsafe: Nuke the orphaned socket if it exists from a previous run
     const socketPath = '/tmp/agent.sock';
     if (fs.existsSync(socketPath)) {
@@ -49,8 +53,9 @@ export function activate(context: vscode.ExtensionContext) {
 
 
     // USE #1: Capture Standard Output (The Agent's Thoughts)
-    backendProcess.stdout?.on('data', (data) => {
-        backendChannel.append(data.toString());
+    // Spawn the binary and force it to run inside that directory
+    backendProcess = spawn(binaryPath, [], {
+        cwd: activeWorkspace
     });
 
     // USE #2: Capture Standard Error (Python crashes, tracebacks)
