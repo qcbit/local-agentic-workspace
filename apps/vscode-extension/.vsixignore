@@ -1,0 +1,52 @@
+# 1. Ignore Configuration & Build Files
+.vscode/**
+.gitignore
+.vsixignore
+.github
+.editorconfig
+tsconfig.json
+webpack.config.js
+esbuild.js
+README.md
+*.pcap
+
+# 2. Ignore Raw TypeScript / React Source Code
+# (The user only needs the compiled JS inside the out/ directory)
+src/**
+webview/**
+scripts/**
+
+# 3. Ignore Python Virtual Environments & Cache
+# (These are massive and platform-specific)
+.venv/**
+venv/**
+__pycache__/**
+*.pyc
+
+# 4. Ignore Raw Python Source Code
+# (Because we are shipping the PyInstaller binary inside bin/ instead!)
+services/orchestrator/**/*.py
+services/orchestrator/requirements.txt
+apps/agent-cli/**
+apps/tui/**
+
+# 5. Ignore Package Manager Lockfiles
+package-lock.json
+yarn.lock
+
+# 6. Ignore Local Vector Databases and Indices
+# (Never ship your personal codebase embeddings!)
+.lancedb/**
+*.lance
+
+# 7. Ignore Build Artifacts
+*.spec
+build/
+dist/
+
+# 8. Ignore tests
+test/**
+
+# 9. Ignore Node Modules (Code is bundled via esbuild!)
+node_modules/**
+
