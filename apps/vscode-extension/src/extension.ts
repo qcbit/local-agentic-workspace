@@ -18,44 +18,61 @@ let backendProcess: ChildProcess | undefined;
 const codeLensProvider = new AgentApprovalCodeLensProvider();
 
 export function activate(context: vscode.ExtensionContext) {
-    const backendChannel = vscode.window.createOutputChannel('Local Agentic Backend');
-    context.subscriptions.push(backendChannel);
-
-    const platform = os.platform();
-    const arch = os.arch();
-
-    let binaryName = 'uds_server-linux-x64'; // Fallback
-    if (platform === 'darwin' && arch === 'arm64') {
-        binaryName = 'uds_server-macos-arm64';
-    } else if (platform === 'darwin' && arch === 'x64') {
-        binaryName = 'uds_server-macos-x64';
-    } else if (platform === 'win32') {
-        binaryName = 'uds_server-win-x64.exe';
-    }
-
-    // Safely determine the active workspace path, or fallback to the user's home directory
+    // 1. Move the workspace definition to the very top so it can be used immediately
     const workspaceFolders = vscode.workspace.workspaceFolders;
     const activeWorkspace = workspaceFolders ? workspaceFolders[0].uri.fsPath : os.homedir();
 
-    // Failsafe: Nuke the orphaned socket if it exists from a previous run
+    let command: string;
+    let args: string[] = [];
+
+    // 2. Check if we are running via F5 (Debug Mode) or in production
+    if (context.extensionMode === vscode.ExtensionMode.Development) {
+        // 🐛 DEBUG MODE: Run the raw Python script directly!
+        // Navigate up from apps/vscode-extension/ to the monorepo root's .venv
+        // command = path.join(context.extensionPath, '../../.venv/bin/python');
+        command = '/Users/lance/Developer/local-agentic-workspace/.venv/bin/python3';
+
+        const scriptPath = path.join(context.extensionPath, '../../services/orchestrator/src/ipc/uds_server.py');
+        args = [scriptPath];
+        vscode.window.showInformationMessage("🐛 Starting Agentic Backend in Developer Mode");
+    } else {
+        // 🚀 PRODUCTION MODE: Run the compiled PyInstaller binary
+        const platform = os.platform();
+        const arch = os.arch();
+
+        let binaryName = 'uds_server-linux-x64'; // Fallback
+        if (platform === 'darwin' && arch === 'arm64') {
+            binaryName = 'uds_server-macos-arm64';
+        } else if (platform === 'darwin' && arch === 'x64') {
+            binaryName = 'uds_server-macos-x64';
+        } else if (platform === 'win32') {
+            binaryName = 'uds_server-win-x64.exe';
+        }
+        
+        command = path.join(context.extensionPath, 'bin', binaryName);
+    }
+
+    const backendChannel = vscode.window.createOutputChannel('Local Agentic Backend');
+    context.subscriptions.push(backendChannel);
+
+    // 3. Failsafe: Nuke the orphaned socket if it exists from a previous run
     const socketPath = '/tmp/agent.sock';
     if (fs.existsSync(socketPath)) {
         console.log('🧹 Cleaning up orphaned UDS socket...');
         fs.unlinkSync(socketPath);
     }
 
-    backendChannel.appendLine(`🚀 Spawning backend binary: ${binaryName}`);
+    backendChannel.appendLine(`🚀 Spawning backend using: ${command}`);
 
-    // Spawn the binary
-    // Resolve the absolute path to the binary shipped inside your extension's "bin" folder
-    const binaryPath = path.join(context.extensionPath, 'bin', binaryName);
-    backendProcess = spawn(binaryPath);
+    // 4. Spawn the backend ONCE using the dynamically selected command
+    backendProcess = spawn(command, args, {
+        cwd: activeWorkspace,
+        env: { ...process.env, PYTHONUNBUFFERED: "1" }
+    });
 
-
-    // USE #1: Capture Standard Output (The Agent's Thoughts)
-    // Spawn the binary and force it to run inside that directory
-    backendProcess = spawn(binaryPath, [], {
-        cwd: activeWorkspace
+    // Capture Standard Output (Python print statements, raw socket logs, info logs)
+    backendProcess.stdout?.on('data', (data) => {
+        backendChannel.append(data.toString());
     });
 
     // USE #2: Capture Standard Error (Python crashes, tracebacks)

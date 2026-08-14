@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { exec } from 'child_process';
 import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
@@ -130,6 +131,34 @@ export class UdsClient extends EventEmitter {
                                 
                                 // The command will return { status: "approved" | "denied" }
                                 resultPayload = response; 
+                            }
+
+                            // --- TIER 4: Silent Terminal Execution ---
+                            else if (msg.method === "execute_terminal") {
+                                const cmd = msg.params?.command;
+                                
+                                if (!cmd) {
+                                    resultPayload = { output: "Error: No command provided." };
+                                } else {
+                                    console.log(`🤖 Agent executing command: ${cmd}`);
+                                    
+                                    // Calculate the active workspace for the command's current working directory
+                                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                                    const activeWorkspace = workspaceFolders ? workspaceFolders[0].uri.fsPath : os.homedir();
+                                    
+                                    // Wrap exec in a Promise to pause the async loop until the command finishes
+                                    resultPayload = await new Promise((resolve) => {
+                                        exec(cmd, { cwd: activeWorkspace }, (error, stdout, stderr) => {
+                                            if (error) {
+                                                // Send the error back so the agent can self-correct!
+                                                resolve({ output: stderr || error.message });
+                                            } else {
+                                                // Send the successful standard output back to the agent
+                                                resolve({ output: stdout.trim() });
+                                            }
+                                        });
+                                    });
+                                }
                             }
 
                             // Fire the response back to Python using Python's exact ID
