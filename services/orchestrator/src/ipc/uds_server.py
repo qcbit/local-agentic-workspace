@@ -11,9 +11,24 @@ import sys
 from typing import Any, Dict, Optional
 import uuid
 
+# 1. Grab the current fallback path
+workspace_root = os.getcwd()
+
+# 2. Extract the true path passed via VS Code CLI arguments
+if "--workspace" in sys.argv:
+    idx = sys.argv.index("--workspace")
+    if idx + 1 < len(sys.argv):
+        workspace_root = sys.argv[idx + 1]
+
+# 3. Defeat PyInstaller by physically moving the Python process to the true workspace
+if os.path.exists(workspace_root):
+    os.chdir(workspace_root)
+
+# Now os.getcwd(), relative paths, and subprocess.run will all be perfectly aligned!
+workspace_root = os.getcwd()
+
 script_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(script_dir, ".."))                             # .../services/orchestrator/src
-workspace_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
 
 for path in (src_dir, workspace_root):
     if path not in sys.path:
@@ -22,14 +37,9 @@ for path in (src_dir, workspace_root):
 from rag.vector_store import LocalVectorStore
 from services.orchestrator.src.agent.agent_loop import Agent, OllamaProxyProvider
 
-# Dynamically resolve the project root to ensure imports work from any execution path
-project_root = str(Path(__file__).resolve().parent.parent.parent.parent.parent)
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
 logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-config_path = os.path.join(os.getcwd(), '.agentic_config.json')
+config_path = os.path.join(workspace_root, '.agentic_config.json')
 
 def load_config():
         """Load config from the workspace, or create a default one if missing."""
@@ -394,7 +404,7 @@ class JsonRpcUdsServer:
             llm_provider=llm, 
             config=active_config, 
             uds_server=self, 
-            workspace_root=project_root  # Inject the global root here
+            workspace_root=workspace_root
         )
         state = await agent.run(goal, auto_approve=auto_approve)
         return state
@@ -410,7 +420,12 @@ class JsonRpcUdsServer:
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
             
-        server = await asyncio.start_unix_server(self.handle_client, path=self.socket_path)
+        # Increase the StreamReader buffer limit to 10MB to handle large file syncs
+        server = await asyncio.start_unix_server(
+            self.handle_client, 
+            path=self.socket_path, 
+            limit=10 * 1024 * 1024
+        )
         
         os.chmod(self.socket_path, stat.S_IRUSR | stat.S_IWUSR)
         logger.info(f"🔌 UDS JSON-RPC Server listening on {self.socket_path} (Permissions: 0600)")
