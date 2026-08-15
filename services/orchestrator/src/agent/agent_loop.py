@@ -19,6 +19,48 @@ import urllib.error
 
 logger = logging.getLogger(__name__)
 
+def execute_python_repl(code: str, timeout: int = 5) -> str:
+    """Executes Python code in a sandboxed child process with a strict timeout."""
+    if not code:
+        return "Error: No code provided."
+
+    forbidden_modules = {"os", "sys", "subprocess", "shutil", "pty", "socket", "pathlib"}
+    
+    # 1. AST Sandbox Security Check
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split('.')[0] in forbidden_modules:
+                        return f"Error: Import of forbidden module '{alias.name}' is blocked by sandbox."
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and node.module.split('.')[0] in forbidden_modules:
+                    return f"Error: Import from forbidden module '{node.module}' is blocked by sandbox."
+    except SyntaxError as e:
+        return f"SyntaxError in provided code: {e}"
+
+    # 2. Execution via Isolated Child Process
+    try:
+        # sys.executable perfectly inherits your .venv!
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        
+        output = result.stdout
+        if result.stderr:
+            output += f"\n--- STDERR ---\n{result.stderr}"
+            
+        return output.strip() if output.strip() else "Execution successful (no standard output). Did you forget to print()?"
+        
+    except subprocess.TimeoutExpired:
+        return f"Error: Execution timed out after {timeout} seconds. Infinite loop prevented."
+    except Exception as e:
+        return f"Error executing python code: {str(e)}"
+
 def validate_terminal_command(workspace_root: str, command_str: str) -> tuple[bool, str]:
     """
     Scans a shell command for path arguments that escape the workspace root.
@@ -83,36 +125,6 @@ def is_path_safe(workspace_root: str, target_path: str) -> bool:
     except (ValueError, RuntimeError):
         return False
 
-def evaluate_math_expression(expression: str):
-    """Safely evaluates a mathematical expression using AST."""
-    allowed_operators = {
-        ast.Add: operator.add,
-        ast.Sub: operator.sub,
-        ast.Mult: operator.mul,
-        ast.Div: operator.truediv,
-        ast.Pow: operator.pow,
-        ast.USub: operator.neg
-    }
-
-    def eval_node(node):
-        if isinstance(node, ast.Constant):
-            if isinstance(node.value, (int, float)):
-                return node.value
-            raise TypeError(f"Disallowed constant type: {type(node.value)}")
-        elif isinstance(node, ast.BinOp):
-            left = eval_node(node.left)
-            right = eval_node(node.right)
-            return allowed_operators[type(node.op)](left, right)
-        elif isinstance(node, ast.UnaryOp):
-            operand = eval_node(node.operand)
-            return allowed_operators[type(node.op)](operand)
-        else:
-            raise TypeError(f"Unsupported syntax in math expression: {type(node).__name__}")
-
-    parsed_expr = ast.parse(expression, mode='eval').body
-    return eval_node(parsed_expr)
-# -- end evaluate_math_expression ---
-
 class ToolDispatcher:
     """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
     
@@ -129,13 +141,15 @@ class ToolDispatcher:
         ]
 
     async def execute_async(self, tool_name: str, arguments: Dict[str, Any], auto_approve: bool = False) -> str:
-        print(f"🔧 [Tool Call] Dispatching '{tool_name}' with args: {arguments} (Auto-Approve: {auto_approve})")
+        logger.info(f"🔧 [Tool Call] Dispatching '{tool_name}' with args: {arguments} (Auto-Approve: {auto_approve})")
         
         try:
             if tool_name == "file_system":
                 return await self._handle_file_system_async(arguments, auto_approve=auto_approve)
             elif tool_name == "terminal_proxy":
                 return await self._handle_terminal_proxy_async(arguments, auto_approve=auto_approve)
+            elif tool_name == "python_repl":
+                return execute_python_repl(arguments.get("code", ""))
             elif tool_name == "finish_task":
                 return "Task marked as complete by the agent."
             else:
@@ -285,18 +299,18 @@ class ToolRegistry:
         self.vector_store = LocalVectorStore() 
         
         self.tools = {
-            "math_operation": {
-                "name": "math_operation",
-                "description": "Evaluates arithmetic expressions (addition, subtraction, multiplication, division). Use this tool whenever you need to perform mathematical calculations.",
+            "python_repl": {
+                "name": "python_repl",
+                "description": "A sandboxed Python environment. Use this to execute Python code for mathematical calculations, data formatting, and complex logic. You MUST use print() to output results so they can be read.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "expression": {
+                        "code": {
                             "type": "string",
-                            "description": "The mathematical expression to evaluate (e.g., '1 + 1', '(145 * 3) / 2.5')."
+                            "description": "The Python script to execute."
                         }
                     },
-                    "required": ["expression"]
+                    "required": ["code"]
                 }
             },
             "search_codebase": {
@@ -340,18 +354,7 @@ class ToolRegistry:
 
     async def execute_tool_async(self, tool_name: str, arguments: dict) -> Optional[str]:
         try:
-            if tool_name == "math_operation":
-                expr = arguments.get("expression")
-                if not isinstance(expr, str) or not expr.strip():
-                    return "Error: A valid 'expression' string is required."
-                
-                try:
-                    result = evaluate_math_expression(expr)
-                    return f"Result: {result}"
-                except Exception as e:
-                    return f"Error evaluating math expression: {str(e)}"
-                
-            elif tool_name == "search_codebase":
+            if tool_name == "search_codebase":
                 query = arguments.get("query")
                 if not isinstance(query, str) or not query.strip():
                     return "Error: search query must be a non-empty string."
@@ -414,7 +417,7 @@ class Agent:
 
         # OFF-LOAD TO THREAD: Prevents freezing the Textual UI
         raw_response = await asyncio.to_thread(self.llm_provider.generate,context)
-        print(f"🧠 [Reasoning] LLM Output:\n{raw_response}")
+        logger.info(f"🧠 [Reasoning] LLM Output:\n{raw_response}")
 
         clean_response = raw_response.strip()
 
@@ -452,7 +455,7 @@ class Agent:
             if ui_callback:
                 ui_callback(msg)
             else:
-                print(msg)
+                logger.info(msg)
 
         state = AgentState(user_goal=user_goal)
         log(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
@@ -471,7 +474,7 @@ class Agent:
             You have access to the following tools:
             1. 'terminal_proxy' - args: {{"command": "<bash command>"}}
             2. 'file_system' - args: {{"action": "<read/write>", "path": "<file path>", "content": "<string to write>"}} (CRITICAL RULE: You MUST NOT use the 'write' action to proactively fix bugs, format, or modify code UNLESS the user's explicit goal specifically asked you to rewrite or fix the file.)
-            3. 'math_operation' - args: {{"expression": "<math expression>"}}
+            3. 'python_repl' - args: {{"code": "<valid python code>"}}
             4. 'finish_task' - args: {{"summary": "<The comprehensive final answer, data, or requested information to show the user>"}}
 
             AVAILABLE CONTEXT TOOLS:
@@ -481,6 +484,8 @@ class Agent:
             
             CRITICAL RULES:
             - YOUR CURRENT WORKING DIRECTORY IS: {self.workspace_root}
+            - ZERO INTERNAL MATH: You are strictly forbidden from performing mathematical calculations or complex data transformations internally. You MUST generate a Python script using the 'python_repl' tool, execute it, and read the printed output.
+            - When using 'python_repl', you must explicitly use `print()` statements to observe the calculated results.
             - When using the 'file_system' tool, you MUST use the exact paths provided by your context tools relative to this directory. Do not guess or modify paths.
             - If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}
             - Never use Python-style 'None'. Use strict JSON only.
@@ -552,16 +557,16 @@ class Agent:
             log(f"[bold blue]👀 [Observation][/bold blue]\n{observation}")
 
             if tool_name == "error" and "Connection Error" in str(llm_response.get("reasoning", "")):
-                print("🛑 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
+                log("🛑 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
                 break
 
             state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name))
             state.iterations += 1
 
         if not state.is_complete:
-            print("\n⚠️ --- Agent Loop Terminated (Max Iterations Reached) ---")
+            log("\n⚠️ --- Agent Loop Terminated (Max Iterations Reached) ---")
         else:
-            print("\n🏁 --- Agent Loop Completed ---")
+            log("\n🏁 --- Agent Loop Completed ---")
             
         return state
 
