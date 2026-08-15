@@ -52,6 +52,9 @@ export function activate(context: vscode.ExtensionContext) {
         command = path.join(context.extensionPath, 'bin', binaryName);
     }
 
+    // 🎯 Force pass the true workspace as a CLI argument!
+    args.push("--workspace", activeWorkspace);
+
     const backendChannel = vscode.window.createOutputChannel('Local Agentic Backend');
     context.subscriptions.push(backendChannel);
 
@@ -67,7 +70,11 @@ export function activate(context: vscode.ExtensionContext) {
     // 4. Spawn the backend ONCE using the dynamically selected command
     backendProcess = spawn(command, args, {
         cwd: activeWorkspace,
-        env: { ...process.env, PYTHONUNBUFFERED: "1" }
+        env: { 
+            ...process.env, 
+            PYTHONUNBUFFERED: "1",
+            AGENTIC_WORKSPACE_ROOT: activeWorkspace // Inject the true path
+        }
     });
 
     // Capture Standard Output (Python print statements, raw socket logs, info logs)

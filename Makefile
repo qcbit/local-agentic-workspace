@@ -43,3 +43,11 @@ package: build-backend
 	@cd apps/vscode-extension && npm run compile
 	@echo "Packaging the VS Code extension..."
 	@cd apps/vscode-extension && npx vsce package
+
+install:
+	@echo "Installing the VS Code extension..."
+	@code --install-extension apps/vscode-extension/local-agentic-workspace-0.1.0.vsix --force 
+
+reinstall: clean package install
+	@echo "Reinstalled the VS Code extension."
+
