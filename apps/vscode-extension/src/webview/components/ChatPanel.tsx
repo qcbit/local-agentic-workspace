@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 declare const acquireVsCodeApi: any;
 
@@ -10,28 +10,26 @@ export const ChatPanel: React.FC = () => {
     const [messages, setMessages] = useState<{ role: string, content: string }[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isAutoApprove, setIsAutoApprove] = useState(false);
-    
-    // 1. Moved state INSIDE the component
     const [currentThought, setCurrentThought] = useState<string>("");
+    
+    // 1. Create a ref to directly manipulate the textarea's height
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    // Listen for IPC responses routed from the Python orchestrator
     useEffect(() => {
         const handler = (event: MessageEvent) => {
             const message = event.data;
-            
-            // 2. Merged the agentThinking listener into your existing handler
             if (message.command === 'agentThinking') {
                 setCurrentThought(message.text);
             } 
             else if (message.command === 'agentResponse') {
                 setMessages(prev => [...prev, { role: 'agent', content: message.text }]);
                 setIsLoading(false);
-                setCurrentThought(""); // Clear the thought when finished
+                setCurrentThought(""); 
             } 
             else if (message.command === 'agentError') {
                 setMessages(prev => [...prev, { role: 'error', content: message.text }]);
                 setIsLoading(false);
-                setCurrentThought(""); // Clear the thought on error
+                setCurrentThought(""); 
             }
         };
         window.addEventListener('message', handler);
@@ -41,19 +39,40 @@ export const ChatPanel: React.FC = () => {
     const handleSend = () => {
         if (!input.trim() || isLoading) return;
         
-        // Render user message immediately
         setMessages(prev => [...prev, { role: 'user', content: input }]);
         setIsLoading(true);
-        setCurrentThought("Initializing..."); // Set an initial loading state
+        setCurrentThought("Initializing..."); 
         
-        // Dispatch command to the Extension Host
         vscode.postMessage({
             command: 'executeTask',
             goal: input,
             autoApprove: isAutoApprove
         });
         
+        // 2. Clear input state AND reset the textarea height
         setInput('');
+        if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto';
+        }
+    };
+
+    // 3. React-compliant auto-resize logic
+    const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+        setInput(e.target.value);
+        if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto';
+            const newHeight = Math.min(textareaRef.current.scrollHeight, 200);
+            textareaRef.current.style.height = `${newHeight}px`;
+            textareaRef.current.style.overflowY = textareaRef.current.scrollHeight > 200 ? 'auto' : 'hidden';
+        }
+    };
+
+    // 4. Handle Enter (Submit) and Shift+Enter (New Line)
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault(); // Prevent the default new line
+            handleSend();
+        }
     };
 
     return (
@@ -79,7 +98,6 @@ export const ChatPanel: React.FC = () => {
                     </div>
                 ))}
                 
-                {/* 3. Replaced your generic loading text with the dynamic thought stream */}
                 {isLoading && currentThought && (
                     <div style={{ alignSelf: 'flex-start', opacity: 0.7, fontStyle: 'italic', padding: '8px 12px' }}>
                         <span className="spinner">🌀</span> {currentThought}
@@ -87,8 +105,8 @@ export const ChatPanel: React.FC = () => {
                 )}
             </div>
             
-            <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', borderTop: '1px solid var(--vscode-widget-border)' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-foreground)', fontSize: '12px', cursor: 'pointer' }}>
+            <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', borderTop: '1px solid var(--vscode-widget-border)', alignItems: 'flex-end' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-foreground)', fontSize: '12px', cursor: 'pointer', paddingBottom: '8px' }}>
                     <input 
                         type="checkbox" 
                         checked={isAutoApprove}
@@ -97,18 +115,35 @@ export const ChatPanel: React.FC = () => {
                     />
                     Auto-Approve
                 </label>
-                <input 
-                    type="text" 
+                
+                {/* 5. The fully React-bound textarea replacing the old input */}
+                <textarea 
+                    ref={textareaRef}
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                    placeholder="Ask the agent..."
-                    style={{ flex: 1, padding: '8px', backgroundColor: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', outline: 'none' }}
+                    onChange={handleInputChange}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Ask the agent... (Shift+Enter for new line)" 
+                    rows={1}
+                    style={{ 
+                        flex: 1, 
+                        padding: '8px', 
+                        backgroundColor: 'var(--vscode-input-background)', 
+                        color: 'var(--vscode-input-foreground)', 
+                        border: '1px solid var(--vscode-input-border)', 
+                        outline: 'none',
+                        resize: 'none',
+                        overflowY: 'hidden',
+                        fontFamily: 'inherit',
+                        minHeight: '18px',
+                        maxHeight: '200px',
+                        borderRadius: '2px'
+                    }}
                 />
+                
                 <button 
                     onClick={handleSend}
                     disabled={isLoading}
-                    style={{ padding: '8px 12px', backgroundColor: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', cursor: isLoading ? 'not-allowed' : 'pointer' }}
+                    style={{ padding: '8px 12px', backgroundColor: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', cursor: isLoading ? 'not-allowed' : 'pointer', marginBottom: '2px' }}
                 >
                     Send
                 </button>
