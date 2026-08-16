@@ -93,7 +93,3 @@ This extension is designed to be 100% air-gapped.
 **Local Vector DB**: LanceDB runs strictly on the host machine.
 
 **Explicit Approvals**: The agent cannot write to the file system without explicit user approval via the CodeLens diff UI.
-
-## Status
-
-Under development
