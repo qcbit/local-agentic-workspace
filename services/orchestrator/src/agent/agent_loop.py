@@ -412,6 +412,9 @@ class Agent:
             llm_provider=self.llm_provider,
         )
 
+        # 🎯 Initialize the state ONCE so history survives multiple turns
+        self.state = AgentState(user_goal="")
+
     async def reason(self, context: List[Dict[str, str]]) -> Dict[str, Any]:
         """Invokes the LLM and parses the structured JSON response."""
 
@@ -457,11 +460,19 @@ class Agent:
             else:
                 logger.info(msg)
 
-        state = AgentState(user_goal=user_goal)
+        # 🎯 Reset iteration counters for the new turn, but KEEP the history
+        self.state.user_goal = user_goal
+        self.state.is_complete = False
+        self.state.iterations = 0
+        self.state.summary = ""
+
+        # 🎯 Append the new prompt as a USER message to the history
+        self.state.history.append(Message(role=Role.USER, content=user_goal))
+
         log(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
 
-        while not state.is_complete and state.iterations < state.max_iterations:
-            log(f"\n[dim]🔄 --- Iteration {state.iterations + 1} ---[/dim]")
+        while not self.state.is_complete and self.state.iterations < self.state.max_iterations:
+            log(f"\n[dim]🔄 --- Iteration {self.state.iterations + 1} ---[/dim]")
             
             # Fetch dynamically from our properly named tool_registry
             tool_descriptions = "\n".join([f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()])
@@ -506,7 +517,7 @@ class Agent:
             - WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file. 
             """
             
-            context = self.memory.build_safe_context(state, system_prompt)
+            context = self.memory.build_safe_context(self.state, system_prompt)
             llm_response = await self.reason(context)
 
             if self.uds_server:
@@ -516,7 +527,7 @@ class Agent:
                     {"message": f"🧠 Thinking: {reasoning_text}"}
                 )
             
-            state.history.append(Message(role=Role.ASSISTANT, content=json.dumps(llm_response)))
+            self.state.history.append(Message(role=Role.ASSISTANT, content=json.dumps(llm_response)))
 
             tool_name = llm_response.get("tool", "unknown")
             tool_args = llm_response.get("tool_args", {})
@@ -537,13 +548,13 @@ class Agent:
             log(f"[bold yellow]🔧 [Dispatching][/bold yellow] {tool_name} with args: {tool_args}")
 
             if tool_name == "finish_task":
-                state.is_complete = True
+                self.state.is_complete = True
                 summary = tool_args.get("summary", "Task completed successfully.")
                 log(f"[bold green]✅ [Task Complete][/bold green] {summary}")
 
                 # Actually save the summary to the state so the server can return it
-                state.summary = summary 
-                state.history.append(Message(role=Role.TOOL, content=summary, name=tool_name))
+                self.state.summary = summary 
+                self.state.history.append(Message(role=Role.TOOL, content=summary, name=tool_name))
                 break
 
             # 4. Route the tool call to the correct handler
@@ -560,15 +571,15 @@ class Agent:
                 log("🛑 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
                 break
 
-            state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name))
-            state.iterations += 1
+            self.state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name))
+            self.state.iterations += 1
 
-        if not state.is_complete:
+        if not self.state.is_complete:
             log("\n⚠️ --- Agent Loop Terminated (Max Iterations Reached) ---")
         else:
             log("\n🏁 --- Agent Loop Completed ---")
             
-        return state
+        return self.state
 
 # --- Agent Core ---
 

@@ -106,6 +106,8 @@ class JsonRpcUdsServer:
         self.pending_requests = {}
         # We need a reference to the active writer to push the message
         self.active_writer = None
+        # 🎯 Hold the persistent agent in memory
+        self.persistent_agent = None
 
     def register_notification_handler(self, method_name: str, callback_coroutine):
         """Registers an async callback for a specific incoming notification."""
@@ -260,6 +262,9 @@ class JsonRpcUdsServer:
         # 6. Update in-memory reference
         self.config = config_data
 
+        # 🎯 Nuke the persistent agent so the memory resets and the new model loads
+        self.persistent_agent = None
+
         logger.info(f"✅ Config successfully updated on disk and in memory for profile: '{active_profile}'")
         return {"status": "success", "message": "Configuration merged and saved."}
 
@@ -394,19 +399,21 @@ class JsonRpcUdsServer:
         if not endpoint or not model_name:
             raise ValueError(f"Missing endpoint or model in workspace config. Current config state: {self.config}")
         
-        llm = OllamaProxyProvider(
-            endpoint_url=endpoint,
-            model=model_name
-        )
-        
-        # Pass uds_server=self so the ToolRegistry can execute context tools!
-        agent = Agent(
-            llm_provider=llm, 
-            config=active_config, 
-            uds_server=self, 
-            workspace_root=workspace_root
-        )
-        state = await agent.run(goal, auto_approve=auto_approve)
+        # 🎯 ONLY instantiate the agent if it doesn't exist yet
+        if self.persistent_agent is None:
+            llm = OllamaProxyProvider(
+                endpoint_url=endpoint,
+                model=model_name
+            )
+            
+            self.persistent_agent = Agent(
+                llm_provider=llm, 
+                config=active_config, 
+                uds_server=self, 
+                workspace_root=workspace_root
+            )
+
+        state = await self.persistent_agent.run(goal, auto_approve=auto_approve)
         return state
 
     def _success_response(self, req_id: Any, result: Any) -> Dict[str, Any]:
