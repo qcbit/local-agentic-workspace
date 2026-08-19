@@ -20,6 +20,33 @@ import urllib.error
 
 logger = logging.getLogger(__name__)
 
+def get_python_interpreter() -> str:
+    """Finds a valid Python interpreter, avoiding PyInstaller binary wrappers."""
+    # 1. If running standard python, sys.executable is safe
+    if not getattr(sys, 'frozen', False):
+        return sys.executable
+        
+    # 2. If running as a PyInstaller bundle, sys.executable points to the binary.
+    # We must search the host system for a real python interpreter.
+    possible_interpreters = []
+    
+    if os.name == 'nt': # Windows
+        possible_interpreters = ['python', 'python3', 'py']
+    else: # macOS / Linux
+        possible_interpreters = ['python3', '/usr/bin/python3', '/usr/local/bin/python3']
+        
+    for interp in possible_interpreters:
+        try:
+            # Verify the interpreter actually works
+            result = subprocess.run([interp, "--version"], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                return interp
+        except Exception:
+            continue
+            
+    # Fallback default
+    return 'python3'
+
 def execute_python_repl(code: str, timeout: int = 5) -> str:
     """Executes Python code in a sandboxed child process with a strict timeout."""
     if not code:
@@ -41,11 +68,12 @@ def execute_python_repl(code: str, timeout: int = 5) -> str:
     except SyntaxError as e:
         return f"SyntaxError in provided code: {e}"
 
-    # 2. Execution via Isolated Child Process
+    # 2. Execution via Isolated Child Process using a real interpreter
+    python_bin = get_python_interpreter()
+
     try:
-        # sys.executable perfectly inherits your .venv!
         result = subprocess.run(
-            [sys.executable, "-c", code],
+            [python_bin, "-c", code],
             capture_output=True,
             text=True,
             timeout=timeout
