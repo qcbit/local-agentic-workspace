@@ -12,6 +12,7 @@ from services.orchestrator.src.rag.vector_store import LocalVectorStore
 from services.orchestrator.src.memory.context_manager import SlidingContextManager
 import shlex
 import subprocess
+import sys
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 import urllib.request
@@ -377,6 +378,9 @@ class ToolRegistry:
                 # ask the UDS server to request data FROM Node.js
                 response = await self.uds_server.request_client_context(tool_name)
                 return response.get("content", "Error: No content received from VS Code.")
+
+            elif tool_name == "python_repl":
+                return execute_python_repl(arguments.get("code", ""))
 
             else:
                 return f"Tool {tool_name} not found."
