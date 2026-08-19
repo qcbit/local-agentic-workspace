@@ -22,16 +22,17 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     const activeWorkspace = workspaceFolders ? workspaceFolders[0].uri.fsPath : os.homedir();
 
+    // 2. Read the user-defined path from VS Code settings
+    const config = vscode.workspace.getConfiguration('local-agentic-workspace');
+    const globalConfigPath = config.get<string>('globalConfigPath', '');
+
     let command: string;
     let args: string[] = [];
 
-    // 2. Check if we are running via F5 (Debug Mode) or in production
+    // 3. Check if we are running via F5 (Debug Mode) or in production
     if (context.extensionMode === vscode.ExtensionMode.Development) {
         // 🐛 DEBUG MODE: Run the raw Python script directly!
-        // Navigate up from apps/vscode-extension/ to the monorepo root's .venv
-        // command = path.join(context.extensionPath, '../../.venv/bin/python');
         command = '/Users/lance/Developer/local-agentic-workspace/.venv/bin/python3';
-
         const scriptPath = path.join(context.extensionPath, '../../services/orchestrator/src/ipc/uds_server.py');
         args = [scriptPath];
         vscode.window.showInformationMessage("🐛 Starting Agentic Backend in Developer Mode");
@@ -52,13 +53,19 @@ export function activate(context: vscode.ExtensionContext) {
         command = path.join(context.extensionPath, 'bin', binaryName);
     }
 
+    // 4. Inject Dynamic CLI Arguments
     // 🎯 Force pass the true workspace as a CLI argument!
     args.push("--workspace", activeWorkspace);
+
+    // 🎯 Pass the global config path if the user defined one
+    if (globalConfigPath && globalConfigPath.trim() !== '') {
+        args.push('--global-config', globalConfigPath.trim());
+    }
 
     const backendChannel = vscode.window.createOutputChannel('Local Agentic Backend');
     context.subscriptions.push(backendChannel);
 
-    // 3. Failsafe: Nuke the orphaned socket if it exists from a previous run
+    // 5. Failsafe: Nuke the orphaned socket if it exists from a previous run
     const socketPath = '/tmp/agent.sock';
     if (fs.existsSync(socketPath)) {
         console.log('🧹 Cleaning up orphaned UDS socket...');
@@ -67,7 +74,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     backendChannel.appendLine(`🚀 Spawning backend using: ${command}`);
 
-    // 4. Spawn the backend ONCE using the dynamically selected command
+    // 6. Spawn the backend ONCE using the dynamically selected command
     backendProcess = spawn(command, args, {
         cwd: activeWorkspace,
         env: { 
@@ -266,17 +273,6 @@ export function activate(context: vscode.ExtensionContext) {
     const searchOutputChannel = vscode.window.createOutputChannel('Local Agentic Search');
     context.subscriptions.push(searchOutputChannel);
 
-    // 2. Start the Warp Proxy Server natively inside VS Code
-    try {
-        proxyServer = new WarpProxyServer();
-        proxyServer.start();
-        context.subscriptions.push({ dispose: () => proxyServer.stop() });
-        console.log('Warp Proxy Server started successfully.');
-    } catch (error: any) {
-        vscode.window.showErrorMessage(`Failed to start proxy server: ${error.message}`);
-    }
-
-    // ... 
     // 2. Start the Warp Proxy Server natively inside VS Code
     try {
         proxyServer = new WarpProxyServer();

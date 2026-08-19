@@ -13,6 +13,8 @@ import uuid
 
 # 1. Grab the current fallback path
 workspace_root = os.getcwd()
+# Define a cross-platform default for the global config
+global_config_path = os.path.expanduser("~/.agentic_config.json")
 
 # 2. Extract the true path passed via VS Code CLI arguments
 if "--workspace" in sys.argv:
@@ -20,7 +22,13 @@ if "--workspace" in sys.argv:
     if idx + 1 < len(sys.argv):
         workspace_root = sys.argv[idx + 1]
 
-# 3. Defeat PyInstaller by physically moving the Python process to the true workspace
+# 3. Extract the user-defined global config path
+if "--global-config" in sys.argv:
+    idx = sys.argv.index("--global-config")
+    if idx + 1 < len(sys.argv):
+        global_config_path = sys.argv[idx + 1]
+
+# 4. Defeat PyInstaller by physically moving the Python process to the true workspace
 if os.path.exists(workspace_root):
     os.chdir(workspace_root)
 
@@ -28,7 +36,7 @@ if os.path.exists(workspace_root):
 workspace_root = os.getcwd()
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-src_dir = os.path.abspath(os.path.join(script_dir, ".."))                             # .../services/orchestrator/src
+src_dir = os.path.abspath(os.path.join(script_dir, ".."))  # .../services/orchestrator/src
 
 for path in (src_dir, workspace_root):
     if path not in sys.path:
@@ -42,28 +50,51 @@ logger = logging.getLogger(__name__)
 config_path = os.path.join(workspace_root, '.agentic_config.json')
 
 def load_config():
-        """Load config from the workspace, or create a default one if missing."""
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"WARNING - Error reading config: {e}")
-                
-        # Default configuration if the file doesn't exist yet
-        default_config = {
-            "model": "llama3",
-            "endpoint": "http://127.0.0.1:11434"
+    """Load config from the workspace, fallback to global, or create a default."""
+    local_config_path = os.path.join(workspace_root, '.agentic_config.json')
+    
+    # 1. Try Workspace Config
+    if os.path.exists(local_config_path):
+        try:
+            with open(local_config_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error reading local config: {e}")
+            
+    # 2. Try User-Defined Global Config
+    if os.path.exists(global_config_path):
+        try:
+            with open(global_config_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error reading global config: {e}")
+            
+    # 3. Default configuration if neither exists
+    default_config = {
+        "active_profile": "home",
+        "profiles": {
+            "home": {
+                "llm": {
+                    "model_name": "llama3",
+                    "endpoint_url": "http://127.0.0.1:11434/v1/chat/completions"
+                }
+            }
         }
-        
-        # Save the defaults to the workspace so the user/UI can sync to it
-        save_config(default_config)
-        return default_config
+    }
+    
+    save_config(default_config, force_global=True)
+    return default_config
 
-def save_config(new_config):
-    """Save the updated config to the workspace directory."""
-    with open(config_path, 'w') as f:
-        json.dump(new_config, f, indent=4)
+def save_config(new_config, force_global=False):
+    """Save the updated config. Prefers local workspace unless forced global."""
+    local_config_path = os.path.join(workspace_root, '.agentic_config.json')
+    target_path = global_config_path if force_global else local_config_path
+    
+    try:
+        with open(target_path, 'w') as f:
+            json.dump(new_config, f, indent=4)
+    except Exception as e:
+        logger.error(f"Failed to save config to {target_path}: {e}")
 
 def deep_update(d, u):
     """Recursively merges dictionary 'u' into dictionary 'd'."""

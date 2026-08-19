@@ -26,6 +26,12 @@
           "default": "llama3:8b",
           "description": "The local Ollama model to use for inference."
         },
+        "local-agentic-workspace.globalConfigPath": {
+            "type": "string",
+            "default": "",
+            "description": "Absolute path to the global .agentic_config.json file to use when no workspace is open. If left blank, it defaults to your home directory.",
+            "scope": "machine"
+        },
         "localAgenticWorkspace.memory.maxTokens": {
           "type": "number",
           "default": 6000,
