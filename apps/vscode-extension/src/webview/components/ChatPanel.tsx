@@ -5,15 +5,31 @@ declare const acquireVsCodeApi: any;
 // Safely acquire the API only if it hasn't been acquired yet
 const vscode = (window as any).vscodeApi || ((window as any).vscodeApi = acquireVsCodeApi());
 
+// 1. Fetch the saved state BEFORE initializing the component
+const previousState = vscode.getState() || { 
+    messages: [], 
+    input: '', 
+    isAutoApprove: false 
+};
+
 export const ChatPanel: React.FC = () => {
-    const [input, setInput] = useState('');
-    const [messages, setMessages] = useState<{ role: string, content: string }[]>([]);
-    const [isLoading, setIsLoading] = useState(false);
-    const [isAutoApprove, setIsAutoApprove] = useState(false);
+    // 2. Initialize your React state using the saved values
+    const [messages, setMessages] = useState<{ role: string, content: string }[]>(previousState.messages);
+    const [input, setInput] = useState<string>(previousState.input);
+    const [isAutoApprove, setIsAutoApprove] = useState<boolean>(previousState.isAutoApprove);
+    const [isLoading, setIsLoading] = useState<boolean>(previousState.isLoading);
     const [currentThought, setCurrentThought] = useState<string>("");
-    
-    // 1. Create a ref to directly manipulate the textarea's height
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    // 3. Save to VS Code's internal state manager whenever these values change
+    useEffect(() => {
+        vscode.setState({
+            messages,
+            input,
+            isAutoApprove,
+            isLoading
+        });
+    }, [messages, input, isAutoApprove, isLoading]);
 
     useEffect(() => {
         const handler = (event: MessageEvent) => {
@@ -115,7 +131,9 @@ export const ChatPanel: React.FC = () => {
                     />
                     Auto-Approve
                 </label>
+            </div>
                 
+            <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', borderTop: '1px solid var(--vscode-widget-border)', alignItems: 'flex-end' }}>
                 {/* 5. The fully React-bound textarea replacing the old input */}
                 <textarea 
                     ref={textareaRef}
