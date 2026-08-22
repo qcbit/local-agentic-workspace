@@ -1,3 +1,9 @@
+# Define the extension ID and version for easy reference
+EXT_ID = qcbit.local-agentic-workspace
+PACKAGE_JSON = apps/vscode-extension/package.json
+# Dynamically extract version using node -p
+VERSION := $(shell node -p "require('./$(PACKAGE_JSON)').version")
+
 .PHONY: setup dev clean clean-full lint test build-backend package
 
 setup:
@@ -31,6 +37,8 @@ clean-full: clean
 	@echo "Performing full cleanup (including binaries)..."
 	@rm -rf build/ dist/
 	@rm -rf apps/vscode-extension/bin
+	@echo "🧹 Cleaning up old VS Code extension cache..."
+	rm -rf ~/.vscode/extensions/$(EXT_ID)-*
 
 build-backend:
 	@echo "Compiling the PyInstaller binary using the spec file..."
@@ -50,7 +58,8 @@ install:
 	@echo "🧹 Wiping VS Code extension cache..."
 	@rm -rf ~/.vscode/extensions/$(EXT_ID)-*
 	@echo "Installing the VS Code extension..."
-	@code --install-extension apps/vscode-extension/local-agentic-workspace-0.1.0.vsix --force 
+	@echo "🔍 Target version: $(VERSION)"
+	code --install-extension apps/vscode-extension/local-agentic-workspace-$(VERSION).vsix --force
 
 reinstall:
 	$(MAKE) clean
