@@ -93,28 +93,67 @@ export class UdsClient extends EventEmitter {
                                     resultPayload = { content: "Error: No active or visible editor window found." };
                                 }
                             } 
-                            else if (msg.method === "get_selected_text") {
-                                if (activeEditor && !activeEditor.selection.isEmpty) {
-                                    resultPayload = { 
-                                        content: `[File Path: ${activeEditor.document.uri.fsPath}]\n\n${activeEditor.document.getText(activeEditor.selection)}` 
-                                    };
+
+                            else if (msg.method === 'vscode_command') {
+                                const command = msg.params.command;
+                                
+                                // 🎯 Catch target_path, path, OR the first element of an args array!
+                                const targetPath = msg.params.target_path || msg.params.path || (msg.params.args && msg.params.args[0]); 
+
+                                // 🎯 STRICT VALIDATION: Reject empty, undefined, or non-string paths
+                                if (!targetPath || typeof targetPath !== 'string' || targetPath.trim() === '') {
+                                    resultPayload = { content: `Error: No valid target path provided. Received: ${JSON.stringify(msg.params)}` };
                                 } else {
-                                    resultPayload = { content: "Error: No text selected." };
+                                    try {
+                                        const uri = vscode.Uri.file(targetPath);
+                                        
+                                        // The Window Reload Trap Fix
+                                        if (command === 'vscode.openFolder') {
+                                            setTimeout(() => {
+                                                vscode.commands.executeCommand(command, uri);
+                                            }, 1000);
+                                            
+                                            resultPayload = { content: `Command accepted. VS Code is now reloading into ${targetPath}.` };
+                                        } else {
+                                            // Standard file opens
+                                            await vscode.commands.executeCommand(command, uri);
+                                            resultPayload = { content: `Successfully executed '${command}' on '${targetPath}'.` };
+                                        }
+                                        
+                                    } catch (err: any) {
+                                        resultPayload = { content: `Failed to execute VS Code command: ${err.message}` };
+                                    }
                                 }
                             }
                             
                             // --- TIER 3: Shell Commands (Explicit Modal) ---
-                            else if (msg.method === "request_shell_permission") {
-                                const command = msg.params?.command || "Unknown command";
+                            else if (msg.method === 'request_shell_permission') {
+                                const { command } = msg.params;
                                 
-                                const choice = await vscode.window.showWarningMessage(
-                                    `🚨 The AI Agent wants to execute a shell command:\n\n${command}\n\nDo you want to allow this?`,
-                                    { modal: true },
-                                    "Allow",
-                                    "Deny"
-                                );
-                                
-                                resultPayload = { status: choice === "Allow" ? "approved" : "denied" };
+                                // 🎯 Draw the user's attention!
+                                vscode.window.showInformationMessage("Agent is requesting terminal access. Please check the top of your window.");
+
+                                // Prompt the user with an input box instead of simple buttons
+                                const timeoutInput = await vscode.window.showInputBox({
+                                    prompt: `Agent wants to run: ${command}. Enter timeout in seconds (Esc to deny).`,
+                                    value: '30', // Default to 30 seconds
+                                    ignoreFocusOut: true, // 🎯 Keeps the input box visible even if you click away!
+                                    validateInput: (text) => {
+                                        const parsed = Number.parseInt(text, 10);
+                                        if (Number.isNaN(parsed) || parsed <= 0) {
+                                            return 'Timeout must be a valid positive number in seconds.';
+                                        }
+                                        return null; // Valid
+                                    }
+                                });
+
+                                // 2. Route the user's decision back to Python by assigning to resultPayload
+                                if (timeoutInput === undefined) {
+                                    // If the user presses Escape, timeoutInput is undefined
+                                    resultPayload = { status: 'denied', content: "Action Blocked: The user denied the shell execution request." };
+                                } else {
+                                    resultPayload = { status: 'approved', timeout: parseInt(timeoutInput, 10) };
+                                }
                             }
                             
                             // --- TIER 2: File Writes (Staged Diff Approval) ---

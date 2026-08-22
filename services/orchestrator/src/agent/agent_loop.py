@@ -221,7 +221,7 @@ class ToolDispatcher:
 
             # 🚀 AUTO-APPROVE BYPASS
             if auto_approve:
-                print(f"⚡ [Auto-Approve] Silently writing to '{path}'...")
+                logger.info(f"⚡ [Auto-Approve] Silently writing to '{path}'...")
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
                 return f"Successfully wrote to file '{path}'."
@@ -229,7 +229,7 @@ class ToolDispatcher:
             if not self.uds_server:
                 return "Error: Cannot request write permission. IPC Server not attached."
                 
-            print(f"⏸️  [Proxy] Requesting write permission for '{path}'...")
+            logger.info(f"⏸️  [Proxy] Requesting write permission for '{path}'...")
             # Suspend and ask VS Code for permission
             response = await self.uds_server.request_client_context("request_write_permission", {
                 "path": path,
@@ -258,35 +258,44 @@ class ToolDispatcher:
         is_safe, error_msg = validate_terminal_command(self.workspace_root, command)
         if not is_safe:
             logger.warning(f"🔒 [Sandbox Blocked] Command: '{command}'")
-            return error_msg  # Fed back to LLM as observation
+            return error_msg
 
-        # 🛡️ 2. CRUCIAL SAFEGUARD: DENY-LIST CHECK (Always runs)
+        # 🛡️ 2. DENY-LIST CHECK (Always runs)
         command_lower = command.lower()
         if any(forbidden in command_lower.split() for forbidden in self.shell_deny_list):
-            # Return a strict security violation observation payload
              return f"SECURITY VIOLATION: Command execution blocked. '{command}' contains forbidden keywords."
             
         # 🚀 AUTO-APPROVE BYPASS
         if auto_approve:
-            print(f"⚡ [Auto-Approve] Silently executing '{command}'...")
-            result = subprocess.run(
-                command, 
-                shell=True, 
-                capture_output=True, 
-                text=True, 
-                cwd=self.workspace_root
-            )
-            output = result.stdout if result.returncode == 0 else result.stderr
-            return f"Command exit code {result.returncode}.\nOutput:\n{output}"
+            logger.info(f"⚡ [Auto-Approve] Silently executing '{command}'...")
+            user_timeout = 30 # Default to 30 seconds when silently auto-approving
+            
+            try:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=self.workspace_root
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=user_timeout)
+                stdout_str = stdout.decode('utf-8')
+                stderr_str = stderr.decode('utf-8')
+                output = stdout_str if process.returncode == 0 else stderr_str
+                return f"Command exit code {process.returncode}.\nOutput:\n{output}"
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                return f"Error: Command execution timed out after {user_timeout} seconds."
 
         # TIER 3: Shell commands (Requires Explicit Modal Confirmation)
-        # 2. Prefer the local TUI permission callback over the UDS server
         if self.permission_callback:
-            print(f"⏸️  [Proxy] Requesting TUI permission for '{command}'...")
-            # Wait for the user to click Approve/Deny in the terminal UI
+            logger.info(f"⏸️  [Proxy] Requesting TUI permission for '{command}'...")
             is_approved = await self.permission_callback(f"Allow shell execution:\n\n{command}")
             
             if is_approved:
+                # TUI fallback does not support dynamic timeouts yet, fallback to standard subprocess
                 result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=self.workspace_root)
                 output = result.stdout if result.returncode == 0 else result.stderr
                 return f"Command exit code {result.returncode}.\nOutput:\n{output}"
@@ -296,25 +305,39 @@ class ToolDispatcher:
         if not self.uds_server:
             return "Error: Cannot request shell permission. IPC Server not attached."
             
-        print(f"⏸️  [Proxy] Requesting shell execution permission for '{command}'...")
+        logger.info(f"⏸️  [Proxy] Requesting shell execution permission for '{command}'...")
         response = await self.uds_server.request_client_context("request_shell_permission", {
             "command": command
         })
         
-        # -> NEW: Explicitly check if the UI timed out
         if "content" in response and "timed out" in response["content"]:
             return response["content"]
         
         if response.get("status") == "approved":
-            result = subprocess.run(
-                command, 
-                shell=True, 
-                capture_output=True, 
-                text=True, 
-                cwd=self.workspace_root
-            )
-            output = result.stdout if result.returncode == 0 else result.stderr
-            return f"Command exit code {result.returncode}.\nOutput:\n{output}"
+            # 🎯 Extract custom timeout, fallback to 30s
+            try:
+                user_timeout = int(response.get("timeout", 30))
+            except (ValueError, TypeError):
+                user_timeout = 30
+                
+            try:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=self.workspace_root
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=user_timeout)
+                stdout_str = stdout.decode('utf-8')
+                stderr_str = stderr.decode('utf-8')
+                output = stdout_str if process.returncode == 0 else stderr_str
+                return f"Command exit code {process.returncode}.\nOutput:\n{output}"
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                return f"Error: Command execution timed out after {user_timeout} seconds."
         else:
             return "Action Blocked: The user denied the shell execution request."
 
@@ -328,6 +351,24 @@ class ToolRegistry:
         self.vector_store = LocalVectorStore() 
         
         self.tools = {
+            "vscode_command": {
+                "name": "vscode_command",
+                "description": "Executes a native VS Code command. Use 'vscode.openFolder' to open a directory workspace, or 'vscode.open' to open a specific file in the editor.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The VS Code command ID (e.g., 'vscode.openFolder' or 'vscode.open')"
+                        },
+                        "target_path": {
+                            "type": "string",
+                            "description": "The absolute path to the file or folder"
+                        }
+                    },
+                    "required": ["command", "target_path"]
+                }
+            },
             "python_repl": {
                 "name": "python_repl",
                 "description": "A sandboxed Python environment. Use this to execute Python code for mathematical calculations, data formatting, and complex logic. You MUST use print() to output results so they can be read.",
@@ -397,6 +438,14 @@ class ToolRegistry:
                     formatted_response += f"--- Result {i+1} (File: {res.get('file_path')}) ---\n"
                     formatted_response += f"{res.get('content')}\n\n"
                 return formatted_response
+
+            elif tool_name == "vscode_command":
+                if not self.uds_server:
+                    return "Error: IPC Server not attached to ToolRegistry."
+                
+                # Forward the command request to VS Code
+                response = await self.uds_server.request_client_context(tool_name, arguments)
+                return response.get("content", "Error: No confirmation received from VS Code.")
 
             elif tool_name in ["get_active_file_content", "get_selected_text"]:
                 if not self.uds_server:
@@ -533,7 +582,7 @@ class Agent:
             - If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}
             - Never use Python-style 'None'. Use strict JSON only.
             - NEVER invent, hallucinate, or call tools that are not explicitly listed above. 
-            - NEVER wrap your JSON in markdown code blocks (\``json). - You MUST provide all required arguments for the tool you select. Never send an empty dictionary unless the tool requires no arguments.`
+            - NEVER wrap your JSON in markdown code blocks (```json). - You MUST provide all required arguments for the tool you select. Never send an empty dictionary unless the tool requires no arguments.`
             - Once you have achieved the user's goal based on the observations, you MUST IMMEDIATELY call 'finish_task'. Do not explore further.
             - The 'summary' argument in 'finish_task' is the ONLY information the user will see. You MUST include the actual results, lists, code, or data requested by the user in this summary. Never just say "task complete".
             - NEVER modify, write, or delete any files unless explicitly instructed to do so in the current goal. 

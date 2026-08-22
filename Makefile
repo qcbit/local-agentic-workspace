@@ -53,10 +53,16 @@ package: build-backend
 	@cd apps/vscode-extension && npx vsce package
 
 install:
+	@echo "🛑 Killing orphaned Python daemons..."
+	@pkill -f uds_server-macos-arm64 || true
+	@echo "🧹 Wiping VS Code extension cache..."
+	@rm -rf ~/.vscode/extensions/$(EXT_ID)-*
 	@echo "Installing the VS Code extension..."
 	@echo "🔍 Target version: $(VERSION)"
 	code --install-extension apps/vscode-extension/local-agentic-workspace-$(VERSION).vsix --force
 
-reinstall: clean package install
-	@echo "✅ Reinstall complete! Press Cmd+Shift+P and run 'Developer: Reload Window'."
-
+reinstall:
+	$(MAKE) clean
+	$(MAKE) package
+	$(MAKE) install
+	@echo "✅ Reinstalled the VS Code extension. Press Cmd+Shift+P and run 'Developer: Reload Window'."
