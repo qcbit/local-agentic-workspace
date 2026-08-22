@@ -45,7 +45,17 @@ for path in (src_dir, workspace_root):
 from rag.vector_store import LocalVectorStore
 from services.orchestrator.src.agent.agent_loop import Agent, OllamaProxyProvider
 
-logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# 🎯 Write logs to both the VS Code output panel AND a persistent file
+log_file = os.path.expanduser("~/.agentic_backend.log")
+
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file, encoding='utf-8')
+    ]
+)
 logger = logging.getLogger(__name__)
 config_path = os.path.join(workspace_root, '.agentic_config.json')
 
@@ -165,7 +175,7 @@ class JsonRpcUdsServer:
                 # --- Smart Client Routing ---
                 # Only designate the connection as the VS Code Extension Host if it sends editor-specific commands.
                 # The TUI will never send these, preventing it from stealing the context connection.
-                if req.get("method") in ["sync_file", "update_config", "get_config", "ping"]:
+                if req.get("method") in ["sync_file", "update_config", "get_config", "ping", "execute_agent_task"]:
                     self.active_writer = writer
 
                 # Is this an unprompted notification from VS Code? (Has method, no ID)
@@ -209,6 +219,11 @@ class JsonRpcUdsServer:
                 self.active_writer = None
             writer.close()
             await writer.wait_closed()
+            # 🎯: Immediately cancel all pending IPC requests if VS Code reloads/disconnects
+            for req_id, future in self.pending_requests.items():
+                if not future.done():
+                    future.set_exception(ConnectionError("VS Code client disconnected abruptly (window reloaded)."))
+            self.pending_requests.clear()
 
     async def _dispatch_request(self, payload: str, writer: asyncio.StreamWriter):
         """Processes the request in the background and writes the response."""
