@@ -21,6 +21,8 @@ export function activate(context: vscode.ExtensionContext) {
     // 1. Move the workspace definition to the very top so it can be used immediately
     const workspaceFolders = vscode.workspace.workspaceFolders;
     const activeWorkspace = workspaceFolders ? workspaceFolders[0].uri.fsPath : os.homedir();
+    // 🎯 Walk up two directories from apps/vscode-extension to reach the monorepo root
+    const monorepoRoot = path.resolve(context.extensionPath, '../../');
 
     // 2. Read the user-defined path from VS Code settings
     const config = vscode.workspace.getConfiguration('local-agentic-workspace');
@@ -80,7 +82,8 @@ export function activate(context: vscode.ExtensionContext) {
         env: { 
             ...process.env, 
             PYTHONUNBUFFERED: "1",
-            AGENTIC_WORKSPACE_ROOT: activeWorkspace // Inject the true path
+            AGENTIC_WORKSPACE_ROOT: activeWorkspace, // Inject the true path
+            PYTHONPATH: monorepoRoot
         }
     });
 
