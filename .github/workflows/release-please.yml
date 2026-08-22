@@ -1,0 +1,59 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    # 🎯 Expose outputs so the build job knows if it should run
+    outputs:
+      release_created: ${{ steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          release-type: node
+          path: apps/vscode-extension
+
+  build-and-attach:
+    needs: release-please
+    # 🎯 Only run this job IF the release PR was merged and published
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: macos-14 # Uses Apple Silicon to compile the arm64 binary
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies and Build
+        run: |
+          # Executes your existing packaging pipeline
+          make package
+
+      - name: Upload VSIX to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Locate the newly built .vsix file
+          VSIX_FILE=$(find apps/vscode-extension -name "*.vsix")
+          
+          # Upload it directly to the GitHub Release page
+          gh release upload ${{ needs.release-please.outputs.tag_name }} "$VSIX_FILE"
