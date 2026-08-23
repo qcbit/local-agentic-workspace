@@ -67,46 +67,53 @@ export function activate(context: vscode.ExtensionContext) {
     const backendChannel = vscode.window.createOutputChannel('Local Agentic Backend');
     context.subscriptions.push(backendChannel);
 
-    // 5. Failsafe: Nuke the orphaned socket if it exists from a previous run
+    // 5. Dev Mode Check vs. Failsafe
     const socketPath = '/tmp/agent.sock';
-    if (fs.existsSync(socketPath)) {
-        console.log('🧹 Cleaning up orphaned UDS socket...');
-        fs.unlinkSync(socketPath);
-    }
-
-    backendChannel.appendLine(`🚀 Spawning backend using: ${command}`);
-
-    // 6. Spawn the backend ONCE using the dynamically selected command
-    backendProcess = spawn(command, args, {
-        cwd: activeWorkspace,
-        env: { 
-            ...process.env, 
-            PYTHONUNBUFFERED: "1",
-            AGENTIC_WORKSPACE_ROOT: activeWorkspace, // Inject the true path
-            PYTHONPATH: monorepoRoot
-        }
-    });
-
-    // Capture Standard Output (Python print statements, raw socket logs, info logs)
-    backendProcess.stdout?.on('data', (data) => {
-        backendChannel.append(data.toString());
-    });
-
-    // USE #2: Capture Standard Error (Python crashes, tracebacks)
-    backendProcess.stderr?.on('data', (data) => {
-        backendChannel.append(`[ERROR] ${data.toString()}`);
-    });
-
-    // USE #3: Process Monitoring
-    backendProcess.on('close', (code) => {
-        backendChannel.appendLine(`\n⚠️ Backend process exited with code ${code}`);
-        // Optional: Trigger a VS Code notification so the user knows it crashed
-        vscode.window.showErrorMessage(`Agent backend crashed (Code ${code}). Please reload the window.`);
-    });
     
-    backendProcess.on('error', (err) => {
-        backendChannel.appendLine(`\n❌ Failed to start backend: ${err.message}`);
-    });
+    if (context.extensionMode === vscode.ExtensionMode.Development && fs.existsSync(socketPath)) {
+        // We are in F5 mode AND the socket exists. Assume `make dev` is running!
+        console.log('🛠️ Dev backend detected on /tmp/agent.sock. Skipping binary spawn.');
+        backendChannel.appendLine(`🚀 Attaching to live Python dev server on ${socketPath}`);
+    } else {
+        // 🚀 PRODUCTION (or dev without a running server): Nuke orphaned socket and spawn!
+        if (fs.existsSync(socketPath)) {
+            console.log('🧹 Cleaning up orphaned UDS socket...');
+            fs.unlinkSync(socketPath);
+        }
+
+        backendChannel.appendLine(`🚀 Spawning backend using: ${command}`);
+
+        // 6. Spawn the backend
+        backendProcess = spawn(command, args, {
+            cwd: activeWorkspace,
+            env: { 
+                ...process.env, 
+                PYTHONUNBUFFERED: "1",
+                AGENTIC_WORKSPACE_ROOT: activeWorkspace,
+                PYTHONPATH: monorepoRoot
+            }
+        });
+
+        // Capture Standard Output
+        backendProcess.stdout?.on('data', (data) => {
+            backendChannel.append(data.toString());
+        });
+
+        // Capture Standard Error
+        backendProcess.stderr?.on('data', (data) => {
+            backendChannel.append(`[ERROR] ${data.toString()}`);
+        });
+
+        // Process Monitoring
+        backendProcess.on('close', (code) => {
+            backendChannel.appendLine(`\n⚠️ Backend process exited with code ${code}`);
+            vscode.window.showErrorMessage(`Agent backend crashed (Code ${code}). Please reload the window.`);
+        });
+        
+        backendProcess.on('error', (err) => {
+            backendChannel.appendLine(`\n❌ Failed to start backend: ${err.message}`);
+        });
+    }
 
     console.log('Local Agentic Workspace extension is now active.');
 

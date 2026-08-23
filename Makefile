@@ -1,3 +1,6 @@
+# Enforce parallel execution with 8 jobs by default
+MAKEFLAGS += -j8
+
 # Define the extension ID and version for easy reference
 EXT_ID = qcbit.local-agentic-workspace
 PACKAGE_JSON = apps/vscode-extension/package.json
@@ -38,7 +41,6 @@ clean-full: clean
 	@rm -rf build/ dist/
 	@rm -rf apps/vscode-extension/bin
 	@echo "🧹 Cleaning up old VS Code extension cache..."
-	rm -rf ~/.vscode/extensions/$(EXT_ID)-*
 
 build-backend:
 	@echo "Compiling the PyInstaller binary using the spec file..."
@@ -55,8 +57,6 @@ package: build-backend
 install:
 	@echo "🛑 Killing orphaned Python daemons..."
 	@pkill -f uds_server-macos-arm64 || true
-	@echo "🧹 Wiping VS Code extension cache..."
-	@rm -rf ~/.vscode/extensions/$(EXT_ID)-*
 	@echo "Installing the VS Code extension..."
 	@echo "🔍 Target version: $(VERSION)"
 	code --install-extension apps/vscode-extension/local-agentic-workspace-$(VERSION).vsix --force

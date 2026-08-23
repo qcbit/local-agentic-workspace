@@ -96,24 +96,25 @@ export class UdsClient extends EventEmitter {
 
                             else if (msg.method === 'vscode_command') {
                                 const command = msg.params.command;
-                                
-                                // 🎯 Catch target_path, path, OR the first element of an args array!
                                 const targetPath = msg.params.target_path || msg.params.path || (msg.params.args && msg.params.args[0]); 
 
-                                // 🎯 STRICT VALIDATION: Reject empty, undefined, or non-string paths
                                 if (!targetPath || typeof targetPath !== 'string' || targetPath.trim() === '') {
                                     resultPayload = { content: `Error: No valid target path provided. Received: ${JSON.stringify(msg.params)}` };
                                 } else {
                                     try {
                                         const uri = vscode.Uri.file(targetPath);
-                                        
                                         // The Window Reload Trap Fix
                                         if (command === 'vscode.openFolder') {
-                                            setTimeout(() => {
-                                                vscode.commands.executeCommand(command, uri);
-                                            }, 1000);
-                                            
-                                            resultPayload = { content: `Command accepted. VS Code is now reloading into ${targetPath}.` };
+                                            // 🎯 Verify the directory actually exists!
+                                            if (!fs.existsSync(uri.fsPath)) {
+                                                resultPayload = { content: `Error: The directory '${targetPath}' does not exist on the file system.` };
+                                            } else {
+                                                setTimeout(() => {
+                                                    vscode.commands.executeCommand(command, uri);
+                                                }, 1000);
+                                                
+                                                resultPayload = { content: `Command accepted. VS Code is now reloading into ${targetPath}.` };
+                                            }
                                         } else {
                                             // Standard file opens
                                             await vscode.commands.executeCommand(command, uri);
@@ -288,5 +289,12 @@ export class UdsClient extends EventEmitter {
         
         this.client.write(JSON.stringify(notification) + '\n');
         console.log(`📡 [IPC] Pushed notification: ${method}`);
+    }
+
+    /**
+     * 🛑 Emergency Brake: Sends an instant notification to kill the running agent loop.
+     */
+    public cancelTask(): void {
+        this.sendNotification("cancel_agent_task", {});
     }
 }
