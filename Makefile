@@ -1,3 +1,6 @@
+# Enforce parallel execution with 8 jobs by default
+MAKEFLAGS += -j8
+
 # Define the extension ID and version for easy reference
 EXT_ID = qcbit.local-agentic-workspace
 PACKAGE_JSON = apps/vscode-extension/package.json
