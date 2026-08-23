@@ -136,6 +136,7 @@ class AgentState:
     user_goal: str
     history: List[Message] = field(default_factory=list)
     is_complete: bool = False
+    is_canceled: bool = False
     iterations: int = 0
     max_iterations: int = 10
     summary: str = ""  # to track the running summary 
@@ -544,6 +545,7 @@ class Agent:
         # 🎯 Reset iteration counters for the new turn, but KEEP the history
         self.state.user_goal = user_goal
         self.state.is_complete = False
+        self.state.is_canceled = False
         self.state.iterations = 0
         self.state.summary = ""
 
@@ -552,7 +554,7 @@ class Agent:
 
         log(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
 
-        while not self.state.is_complete and self.state.iterations < self.state.max_iterations:
+        while not self.state.is_complete and not self.state.is_canceled and self.state.iterations < self.state.max_iterations:
             log(f"\n[dim]🔄 --- Iteration {self.state.iterations + 1} ---[/dim]")
             
             # Fetch dynamically from our properly named tool_registry
@@ -600,6 +602,11 @@ class Agent:
             
             context = self.memory.build_safe_context(self.state, system_prompt)
             llm_response = await self.reason(context)
+
+            # 🎯 Emergency abort check after heavy LLM processing
+            if self.state.is_canceled:
+                log("🛑 [Agent] Task was manually cancelled by the user.")
+                break
 
             if self.uds_server:
                 reasoning_text = llm_response.get("reasoning", "...")

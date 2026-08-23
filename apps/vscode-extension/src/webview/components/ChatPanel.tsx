@@ -9,7 +9,8 @@ const vscode = (window as any).vscodeApi || ((window as any).vscodeApi = acquire
 const previousState = vscode.getState() || { 
     messages: [], 
     input: '', 
-    isAutoApprove: false 
+    isAutoApprove: false,
+    isLoading: false
 };
 
 export const ChatPanel: React.FC = () => {
@@ -17,7 +18,7 @@ export const ChatPanel: React.FC = () => {
     const [messages, setMessages] = useState<{ role: string, content: string }[]>(previousState.messages);
     const [input, setInput] = useState<string>(previousState.input);
     const [isAutoApprove, setIsAutoApprove] = useState<boolean>(previousState.isAutoApprove);
-    const [isLoading, setIsLoading] = useState<boolean>(previousState.isLoading);
+    const [isLoading, setIsLoading] = useState<boolean>(false); // Always start unlocked, ignoring previousState.isLoading
     const [currentThought, setCurrentThought] = useState<string>("");
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -47,6 +48,12 @@ export const ChatPanel: React.FC = () => {
                 setIsLoading(false);
                 setCurrentThought(""); 
             }
+            // 🎯 Reset UI if the agent was forcefully stopped
+            else if (message.type === 'agent_stopped') {
+                setMessages(prev => [...prev, { role: 'error', content: 'Agent task was manually canceled.' }]);
+                setIsLoading(false);
+                setCurrentThought("");
+            }
         };
         window.addEventListener('message', handler);
         return () => window.removeEventListener('message', handler);
@@ -65,14 +72,12 @@ export const ChatPanel: React.FC = () => {
             autoApprove: isAutoApprove
         });
         
-        // 2. Clear input state AND reset the textarea height
         setInput('');
         if (textareaRef.current) {
             textareaRef.current.style.height = 'auto';
         }
     };
 
-    // 3. React-compliant auto-resize logic
     const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
         setInput(e.target.value);
         if (textareaRef.current) {
@@ -83,12 +88,23 @@ export const ChatPanel: React.FC = () => {
         }
     };
 
-    // 4. Handle Enter (Submit) and Shift+Enter (New Line)
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault(); // Prevent the default new line
+            e.preventDefault(); 
             handleSend();
         }
+    };
+
+    // 🎯 The function that fires the stop signal to the extension host
+    const handleStopAgent = () => {
+        // 1. Fire the signal to the backend
+        vscode.postMessage({
+            type: 'stop_agent'
+        });
+        // 2. INSTANTLY forcefully unlock the UI (Break the deadlock!)
+        setIsLoading(false);
+        setCurrentThought("");
+        setMessages(prev => [...prev, { role: 'error', content: '🛑 Agent task forcefully aborted.' }]);
     };
 
     return (
@@ -133,8 +149,7 @@ export const ChatPanel: React.FC = () => {
                 </label>
             </div>
                 
-            <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', borderTop: '1px solid var(--vscode-widget-border)', alignItems: 'flex-end' }}>
-                {/* 5. The fully React-bound textarea replacing the old input */}
+            <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', alignItems: 'flex-end' }}>
                 <textarea 
                     ref={textareaRef}
                     value={input}
@@ -158,13 +173,23 @@ export const ChatPanel: React.FC = () => {
                     }}
                 />
                 
-                <button 
-                    onClick={handleSend}
-                    disabled={isLoading}
-                    style={{ padding: '8px 12px', backgroundColor: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', cursor: isLoading ? 'not-allowed' : 'pointer', marginBottom: '2px' }}
-                >
-                    Send
-                </button>
+                {/* 🎯 Toggle between Send and Stop based on isLoading */}
+                {isLoading ? (
+                    <button 
+                        onClick={handleStopAgent}
+                        style={{ padding: '8px 12px', backgroundColor: '#d32f2f', color: 'white', border: 'none', cursor: 'pointer', marginBottom: '2px', borderRadius: '2px' }}
+                    >
+                        🛑 Stop
+                    </button>
+                ) : (
+                    <button 
+                        onClick={handleSend}
+                        disabled={!input.trim()}
+                        style={{ padding: '8px 12px', backgroundColor: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', cursor: !input.trim() ? 'not-allowed' : 'pointer', marginBottom: '2px', borderRadius: '2px' }}
+                    >
+                        Send
+                    </button>
+                )}
             </div>
         </div>
     );

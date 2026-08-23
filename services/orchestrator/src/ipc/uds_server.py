@@ -184,6 +184,12 @@ class JsonRpcUdsServer:
                     params = req.get("params", {})
                     logger.info(f"📥 [IPC] Received notification: {method}")
                     
+                    if method == "cancel_agent_task":
+                        if self.persistent_agent and hasattr(self.persistent_agent, 'state'):
+                            self.persistent_agent.state.is_canceled = True
+                            logger.info("🛑 Emergency brake pulled! Stopping agent loop...")
+                        continue
+
                     if method in self.notification_handlers:
                         # Spin up the handler in the background
                         asyncio.create_task(self.notification_handlers[method](params))

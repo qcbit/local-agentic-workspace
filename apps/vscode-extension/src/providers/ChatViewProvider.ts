@@ -59,28 +59,38 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         // Listen for the prompt from React, send it to Python via IPC
         webviewView.webview.onDidReceiveMessage(async (data) => {
-            if (data.command === 'executeTask') {
-                try {
-                    // Map the React state (autoApprove) to the Python expected key (auto_approve)
-                    const payload = {
-                        goal: data.goal,
-                        auto_approve: data.autoApprove 
-                    };
-                    const result = await this._udsClient.request('execute_agent_task', payload);
+            switch (data.command || data.type) {
+                case 'executeTask':
+                    try {
+                        // Map the React state (autoApprove) to the Python expected key (auto_approve)
+                        const payload = {
+                            goal: data.goal,
+                            auto_approve: data.autoApprove 
+                        };
+                        const result = await this._udsClient.request('execute_agent_task', payload);
 
-                    // Parse agent observation to string
-                    let responseText = "Task completed.";
-                    if (result && result.final_observation) {
-                        responseText = result.final_observation;
-                    } else if (result) {
-                        responseText = JSON.stringify(result, null, 2);
+                        // Parse agent observation to string
+                        let responseText = "Task completed.";
+                        if (result && result.final_observation) {
+                            responseText = result.final_observation;
+                        } else if (result) {
+                            responseText = JSON.stringify(result, null, 2);
+                        }
+
+                        // Send the result back to React
+                        webviewView.webview.postMessage({ command: 'agentResponse', text: responseText });
+                    } catch (error: any) {
+                        webviewView.webview.postMessage({ command: 'agentError', text: error.message || 'Error communicating with orchestrator.' });
                     }
-
-                    // Send the result back to React
-                    webviewView.webview.postMessage({ command: 'agentResponse', text: responseText });
-                } catch (error: any) {
-                    webviewView.webview.postMessage({ command: 'agentError', text: error.message || 'Error communicating with orchestrator.' });
-                }
+                    break;
+                case 'stop_agent':
+                    console.log("🛑 Received stop signal from UI. Routing to IPC...");
+                    if (this._udsClient) {
+                        this._udsClient.cancelTask();
+                        // Optional: Send a message back to React to immediately reset the UI loading state
+                        webviewView.webview.postMessage({ type: 'agent_stopped' });
+                    }
+                    break;
             }
         });
     }
