@@ -62,6 +62,8 @@ jobs:
         run: |
           # Locate the newly built .vsix file
           VSIX_FILE=$(find apps/vscode-extension -name "*.vsix")
+          MAC_ARM64="${VSIX_FILE%.vsix}-macos-arm64.vsix"
+          mv "VSIX_FILE" "MAC_ARM64"
           
           # Upload it directly to the GitHub Release page
           gh release upload "${{ needs.release-please.outputs.tag_name }}" "$VSIX_FILE"
