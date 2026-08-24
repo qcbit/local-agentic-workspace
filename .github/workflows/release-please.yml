@@ -23,9 +23,27 @@ jobs:
 
   build-and-attach:
     needs: release-please
-    # 🎯 Only run this job IF the release PR was merged and published
     if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: macos-14 # Uses Apple Silicon to compile the arm64 binary
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Apple Silicon Mac
+          - os: macos-14
+            target: darwin-arm64
+            binary: uds_server-macos-arm64
+          # Intel Mac
+          - os: macos-13
+            target: darwin-x64
+            binary: uds_server-macos-x64
+          # Linux
+          - os: ubuntu-latest
+            target: linux-x64
+            binary: uds_server-linux-x64
+          # Windows
+          - os: windows-latest
+            target: win32-x64
+            binary: uds_server-win-x64.exe
 
     steps:
       - name: Checkout repository
@@ -34,7 +52,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Node Dependencies
         run: |
@@ -49,21 +67,35 @@ jobs:
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pyinstaller fastembed lancedb # Add any other backend requirements here
 
-      - name: Install dependencies and Build
+      # 🎯 1. Build the OS-Specific Python Binary
+      - name: Compile Backend Binary
         run: |
-          # Executes your existing packaging pipeline
-          make package
+          # Use the matrix variable to name the binary exactly what extension.ts expects
+          pyinstaller services/orchestrator/src/ipc/uds_server.py --name ${{ matrix.binary }} --onefile --clean --noconfirm
+          
+          # Move the compiled binary into the VS Code extension's bin folder
+          mkdir -p apps/vscode-extension/bin
+          mv dist/${{ matrix.binary }} apps/vscode-extension/bin/
+        shell: bash
 
+      # 🎯 2. Build the OS-Specific VSIX using vsce
+      - name: Package VSIX
+        run: |
+          cd apps/vscode-extension
+          # --target tells VS Code this extension is ONLY for this specific OS/CPU
+          npx vsce package --target ${{ matrix.target }}
+        shell: bash
+
+      # 🎯 3. Upload to the Release
       - name: Upload VSIX to Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Locate the newly built .vsix file
           VSIX_FILE=$(find apps/vscode-extension -name "*.vsix")
-          MAC_ARM64="${VSIX_FILE%.vsix}-macos-arm64.vsix"
-          mv "VSIX_FILE" "MAC_ARM64"
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" "$VSIX_FILE"
+        shell: bash
           
           # Upload it directly to the GitHub Release page
           gh release upload "${{ needs.release-please.outputs.tag_name }}" "$VSIX_FILE"
