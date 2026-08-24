@@ -37,6 +37,11 @@ jobs:
         with:
           node-version: 20
 
+      - name: Install Node Dependencies
+      run: |
+        cd apps/vscode-extension
+        npm install
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
