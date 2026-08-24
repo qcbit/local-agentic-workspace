@@ -12,10 +12,9 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    # 🎯 Expose outputs so the build job knows if it should run
     outputs:
-      release_created: ${{ steps.release.outputs.releases_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      release_created: ${{ steps.release.outputs['apps/vscode-extension--release_created'] }}
+      tag_name: ${{ steps.release.outputs['apps/vscode-extension--tag_name'] }}
     steps:
       - id: release
         uses: googleapis/release-please-action@v4
@@ -65,4 +64,4 @@ jobs:
           VSIX_FILE=$(find apps/vscode-extension -name "*.vsix")
           
           # Upload it directly to the GitHub Release page
-          gh release upload ${{ needs.release-please.outputs.tag_name }} "$VSIX_FILE"
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" "$VSIX_FILE"
