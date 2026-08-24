@@ -96,6 +96,3 @@ jobs:
           VSIX_FILE=$(find apps/vscode-extension -name "*.vsix")
           gh release upload "${{ needs.release-please.outputs.tag_name }}" "$VSIX_FILE"
         shell: bash
-          
-          # Upload it directly to the GitHub Release page
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" "$VSIX_FILE"
