@@ -1,0 +1,8 @@
+{
+  "packages": {
+    "apps/vscode-extension": {
+      "release-type": "node",
+      "include-component-in-tag": false
+    }
+  }
+}
