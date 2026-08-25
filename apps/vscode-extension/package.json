@@ -1,7 +1,7 @@
 {
   "name": "local-agentic-workspace",
   "displayName": "Local Agentic Workspace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "Qcbit",
   "author": "Lance Truong",
   "license": "MIT",
@@ -15,8 +15,7 @@
     "vscode": "^1.85.0"
   },
   "main": "./out/extension.js",
-  "activationEvents": [
-  ],
+  "activationEvents": [],
   "contributes": {
     "configuration": {
       "title": "Local Agentic Workspace",
@@ -27,10 +26,10 @@
           "description": "The local Ollama model to use for inference."
         },
         "local-agentic-workspace.globalConfigPath": {
-            "type": "string",
-            "default": "",
-            "description": "Absolute path to the global .agentic_config.json file to use when no workspace is open. If left blank, it defaults to your home directory.",
-            "scope": "machine"
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the global .agentic_config.json file to use when no workspace is open. If left blank, it defaults to your home directory.",
+          "scope": "machine"
         },
         "localAgenticWorkspace.memory.maxTokens": {
           "type": "number",
@@ -39,7 +38,10 @@
         },
         "localAgenticWorkspace.activeProfile": {
           "type": "string",
-          "enum": ["home", "work"],
+          "enum": [
+            "home",
+            "work"
+          ],
           "default": "home",
           "description": "Switch between Home and Work BYOA environments."
         },
@@ -92,7 +94,7 @@
         {
           "id": "localAgenticContainer",
           "title": "Local Agent",
-          "icon": "$(hubot)" 
+          "icon": "$(hubot)"
         },
         {
           "id": "agentic-workspace-sidebar",
