@@ -11,23 +11,22 @@ export class UdsClient extends EventEmitter {
     private buffer: string = '';
     private pendingRequests: Map<number, { resolve: Function, reject: Function }> = new Map();
     private messageId: number = 0;
-    private socketPath: string;
+    private port: number = 7777;
+    private host: string = '127.0.0.1';
 
     constructor() {
         super();
-        // Universally accessible location that both Node and Python can reach
-        this.socketPath = '/tmp/agent.sock';
     }
 
     /**
-     * Establishes the connection to the Unix Domain Socket.
+     * Establishes the connection to the TCP Socket.
      */
     public connect(): Promise<void> {
         return new Promise((resolve, reject) => {
-            this.client = net.createConnection(this.socketPath);
+            this.client = net.createConnection({ port: this.port, host: this.host });
 
             this.client.on('connect', () => {
-                console.log(`🔌 Connected to Python Orchestrator at ${this.socketPath}`);
+                console.log(`🔌 Connected to Python Orchestrator at ${this.host}:${this.port}`);
                 resolve();
             });
 

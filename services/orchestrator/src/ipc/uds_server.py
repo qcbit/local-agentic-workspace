@@ -123,31 +123,21 @@ def get_resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 class JsonRpcUdsServer:
-    """JSON-RPC 2.0 Server over Unix Domain Sockets."""
+    """JSON-RPC 2.0 Server over TCP."""
     
-    def __init__(self, socket_path: Optional[str] = None):
-        # Bind universally to /tmp/agent.sock so Node.js can consistently find it
-        if socket_path is None:
-            self.socket_path = "/tmp/agent.sock"
-        else:
-            self.socket_path = socket_path
-            
+    def __init__(self, host: str = '127.0.0.1', port: int = 7777):
+        self.host = host
+        self.port = port
         self.config = load_config()
 
         self.running = False
-
-        # Registry for spontaneous events from VS Code
         self.notification_handlers = {}
         
-        # Initialize the vector store on startup
         logger.info("Initializing LanceDB Vector Store...")
         self.vector_store = LocalVectorStore()
 
-        # A dictionary to track pending reverse-requests (Requests sent to Node.js)
         self.pending_requests = {}
-        # We need a reference to the active writer to push the message
         self.active_writer = None
-        # 🎯 Hold the persistent agent in memory
         self.persistent_agent = None
 
     def register_notification_handler(self, method_name: str, callback_coroutine):
@@ -483,19 +473,16 @@ class JsonRpcUdsServer:
         return {"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": req_id}
 
     async def start(self):
-        """Binds the UDS socket and enforces strict 0600 permissions."""
-        if os.path.exists(self.socket_path):
-            os.remove(self.socket_path)
-            
+        """Binds the TCP socket."""
         # Increase the StreamReader buffer limit to 10MB to handle large file syncs
-        server = await asyncio.start_unix_server(
+        server = await asyncio.start_server(
             self.handle_client, 
-            path=self.socket_path, 
+            self.host, 
+            self.port,
             limit=10 * 1024 * 1024
         )
         
-        os.chmod(self.socket_path, stat.S_IRUSR | stat.S_IWUSR)
-        logger.info(f"🔌 UDS JSON-RPC Server listening on {self.socket_path} (Permissions: 0600)")
+        logger.info(f"🔌 TCP JSON-RPC Server listening on {self.host}:{self.port}")
         
         async with server:
             await server.serve_forever()

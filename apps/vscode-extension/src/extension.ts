@@ -68,19 +68,13 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(backendChannel);
 
     // 5. Dev Mode Check vs. Failsafe
-    const socketPath = '/tmp/agent.sock';
-    
-    if (context.extensionMode === vscode.ExtensionMode.Development && fs.existsSync(socketPath)) {
-        // We are in F5 mode AND the socket exists. Assume `make dev` is running!
-        console.log('🛠️ Dev backend detected on /tmp/agent.sock. Skipping binary spawn.');
-        backendChannel.appendLine(`🚀 Attaching to live Python dev server on ${socketPath}`);
+    // 5. Dev Mode Check vs. Failsafe
+    if (context.extensionMode === vscode.ExtensionMode.Development) {
+        // We are in F5 mode. Assume `make dev` is running!
+        console.log('🛠️ Dev backend detected. Skipping binary spawn.');
+        backendChannel.appendLine(`🚀 Attaching to live Python dev server on 127.0.0.1:7777`);
     } else {
-        // 🚀 PRODUCTION (or dev without a running server): Nuke orphaned socket and spawn!
-        if (fs.existsSync(socketPath)) {
-            console.log('🧹 Cleaning up orphaned UDS socket...');
-            fs.unlinkSync(socketPath);
-        }
-
+        // 🚀 PRODUCTION: Spawn the binary!
         backendChannel.appendLine(`🚀 Spawning backend using: ${command}`);
 
         // 6. Spawn the backend
