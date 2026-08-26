@@ -43,7 +43,7 @@ for path in (src_dir, workspace_root):
         sys.path.insert(0, path)
 
 from rag.vector_store import LocalVectorStore
-from services.orchestrator.src.agent.agent_loop import Agent, OllamaProxyProvider
+from services.orchestrator.src.agent.agent_loop import Agent, UniversalLLMProvider
 
 # 🎯 Write logs to both the VS Code output panel AND a persistent file
 log_file = os.path.expanduser("~/.agentic_backend.log")
@@ -443,6 +443,13 @@ class JsonRpcUdsServer:
             self.config.get("model_name") or 
             self.config.get("model")
         )
+
+        api_key = (
+            llm_config.get("apiKey") or 
+            llm_config.get("api_key") or 
+            self.config.get("apiKey") or 
+            self.config.get("api_key")
+        )
         
         # 🛡️ Failsafe: Auto-correct naked Ollama URLs to the chat completions path
         if endpoint and endpoint.endswith("11434"):
@@ -453,9 +460,10 @@ class JsonRpcUdsServer:
         
         # 🎯 ONLY instantiate the agent if it doesn't exist yet
         if self.persistent_agent is None:
-            llm = OllamaProxyProvider(
+            llm = UniversalLLMProvider(
                 endpoint_url=endpoint,
-                model=model_name
+                model=model_name,
+                api_key=api_key
             )
             
             self.persistent_agent = Agent(
@@ -558,7 +566,7 @@ async def handle_terminal_error(params: dict):
     try:
         active_profile_name = server.config.get("active_profile", "home")
         active_config = server.config.get("profiles", {}).get(active_profile_name, {})
-        llm = OllamaProxyProvider(
+        llm = UniversalLLMProvider(
             endpoint_url=active_config.get("llm", {}).get("endpoint_url"),
             model=active_config.get("llm", {}).get("model_name")
         )

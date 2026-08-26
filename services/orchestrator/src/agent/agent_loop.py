@@ -680,27 +680,39 @@ class Agent:
 
 # --- Agent Core ---
 
-class OllamaProxyProvider:
-    """Connects the Python agent loop to the local Warp proxy on port 11435."""
+class UniversalLLMProvider:
+    """Connects the Python agent loop to Ollama, OpenAI, or Azure AI Foundry endpoints."""
     
-    def __init__(self, endpoint_url: str = "http://127.0.0.1:11435/v1/chat/completions", model: str = "llama3:8b"):
+    def __init__(self, endpoint_url: str, model: str, api_key: Optional[str] = None):
         self.endpoint_url = endpoint_url
         self.model = model
+        self.api_key = api_key
 
     def generate(self, context: List[Dict[str, str]], require_json: bool = True) -> Optional[str]:
         payload = {
             "model": self.model,
             "messages": context,
             "options": {
-                "num_ctx": 8192  # Expands the context window for heavy RAG injections
+                "num_ctx": 8192
             }
         }
+        
+        # Support both Ollama and standard OpenAI/Azure JSON modes
         if require_json:
             payload["format"] = "json"
+            payload["response_format"] = { "type": "json_object" }
             
         data = json.dumps(payload).encode('utf-8')
         
-        # Retry loop for slow startup or transient drops
+        headers = {'Content-Type': 'application/json'}
+        
+        # 🎯 NEW: Inject authentication headers if an API key is provided
+        if self.api_key and self.api_key.lower() not in ["none", ""]:
+            # Azure AI Foundry requires the 'api-key' header
+            headers['api-key'] = self.api_key
+            # We also include standard Bearer auth to make it universally compatible with OpenAI
+            headers['Authorization'] = f"Bearer {self.api_key}"
+        
         max_retries = 3
         backoff_seconds = 1.5
         
@@ -709,22 +721,29 @@ class OllamaProxyProvider:
                 req = urllib.request.Request(
                     self.endpoint_url, 
                     data=data,
-                    headers={'Content-Type': 'application/json'},
+                    headers=headers,
                     method='POST'
                 )
                 with urllib.request.urlopen(req, timeout=30) as response:
                     res_body = response.read().decode('utf-8')
                     res_json = json.loads(res_body)
-                    return res_json["choices"][0]["message"]["content"]
+                    
+                    # Azure/OpenAI return 'choices', Ollama returns 'message' directly
+                    if "choices" in res_json:
+                        return res_json["choices"][0]["message"]["content"]
+                    elif "message" in res_json:
+                        return res_json["message"]["content"]
+                    else:
+                        return json.dumps(res_json)
                     
             except urllib.error.URLError as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"❌ [Connection Error] Failed to reach proxy after {max_retries} attempts: {e.reason}")
+                    logger.error(f"❌ [Connection Error] Failed to reach provider: {e.reason}")
                     raise RuntimeError(f"LLM Provider unreachable: {e.reason}")
                 
                 logger.warning(f"⚠️ Proxy not ready (attempt {attempt + 1}/{max_retries}), retrying in {backoff_seconds}s...")
                 time.sleep(backoff_seconds)
-                backoff_seconds *= 2  # Exponential backoff
+                backoff_seconds *= 2
 
 # --- Mock Implementation for Testing ---
 
