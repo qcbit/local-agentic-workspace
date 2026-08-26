@@ -78,8 +78,9 @@ jobs:
             --onefile \
             --clean \
             --noconfirm \
-            --paths . \
             --paths services/orchestrator/src \
+            --hidden-import rag.vector_store \
+            --hidden-import agent.agent_loop \
             --collect-all fastembed \
             --collect-all lancedb
           
