@@ -73,7 +73,15 @@ jobs:
       - name: Compile Backend Binary
         run: |
           # Use the matrix variable to name the binary exactly what extension.ts expects
-          pyinstaller services/orchestrator/src/ipc/uds_server.py --name ${{ matrix.binary }} --onefile --clean --noconfirm
+          pyinstaller services/orchestrator/src/ipc/uds_server.py \
+            --name ${{ matrix.binary }} \
+            --onefile \
+            --clean \
+            --noconfirm \
+            --paths . \
+            --paths services/orchestrator/src \
+            --collect-all fastembed \
+            --collect-all lancedb
           
           # Move the compiled binary into the VS Code extension's bin folder
           mkdir -p apps/vscode-extension/bin
