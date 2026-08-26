@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.5...v0.1.6) (2026-08-26)
+
+
+### Bug Fixes
+
+* **os:** Switch to Universal TCP Socket ([1ed6d3f](https://github.com/qcbit/local-agentic-workspace/commit/1ed6d3fb13504394085e8b4e27ddf69774f087d4))
+* **os:** Switch to Universal TCP Socket ([5498b4b](https://github.com/qcbit/local-agentic-workspace/commit/5498b4bc4cb6e2a7fbeb22c78ea43051afd05e14))
+
 ## [0.1.5](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.4...v0.1.5) (2026-08-26)
 
 
