@@ -324,7 +324,7 @@ export function activate(context: vscode.ExtensionContext) {
     updateStatusBar(); 
 
     // Watch config.json for changes so the status bar updates automatically
-    const configWatcher = vscode.workspace.createFileSystemWatcher('**/services/orchestrator/config.json');
+    const configWatcher = vscode.workspace.createFileSystemWatcher('**/.agentic_config.json');
     configWatcher.onDidChange(() => updateStatusBar());
     configWatcher.onDidCreate(() => updateStatusBar());
     context.subscriptions.push(configWatcher);
@@ -535,7 +535,7 @@ function updateStatusBar() {
         // 2. Try to read from the JSON file if it exists
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (workspaceFolders) {
-            const configPath = path.join(workspaceFolders[0].uri.fsPath, 'services', 'orchestrator', 'config.json');
+            const configPath = path.join(workspaceFolders[0].uri.fsPath, '.agentic_config.json');
             
             if (fs.existsSync(configPath)) {
                 const configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -543,8 +543,8 @@ function updateStatusBar() {
                 const profileSettings = configData.profiles?.[profileName];
 
                 if (profileSettings) {
-                    model = profileSettings.llm?.model_name || model;
-                    endpoint = profileSettings.llm?.endpoint_url || endpoint;
+                    model = profileSettings.llm?.model_name || profileSettings.llm?.model || model;
+                    endpoint = profileSettings.llm?.endpoint_url || profileSettings.llm?.endpoint || endpoint;
                 }
             }
         }
@@ -552,7 +552,17 @@ function updateStatusBar() {
         // 3. Format and unconditionally show the status bar item
         const formattedName = profileName.charAt(0).toUpperCase() + profileName.slice(1);
         statusBarItem.text = `$(hubot) ${formattedName}`;
-        statusBarItem.tooltip = `Model: ${model}\nEndpoint: ${endpoint}\nClick to open settings.`;
+
+        // Use URL parsing to make the tooltip endpoint cleaner (e.g., hiding long Azure query strings)
+        let displayEndpoint = endpoint;
+        try {
+            const parsedUrl = new URL(endpoint);
+            displayEndpoint = parsedUrl.hostname;
+        } catch (e) {
+            // Ignore if it's not a valid URL yet
+        }
+
+        statusBarItem.tooltip = `Model: ${model}\nHost: ${displayEndpoint}\nClick to open settings.`;
         statusBarItem.show();
 
     } catch (err) {
