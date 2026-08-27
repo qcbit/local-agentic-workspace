@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.6...v0.1.7) (2026-08-27)
+
+
+### Bug Fixes
+
+* **os:** Force UTF-8 to prevent Windows crashing on emojis ([e5bca93](https://github.com/qcbit/local-agentic-workspace/commit/e5bca93337134b99168fc32248262fb8b44a9ed0))
+
 ## [0.1.6](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.5...v0.1.6) (2026-08-26)
 
 
