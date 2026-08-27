@@ -681,69 +681,75 @@ class Agent:
 # --- Agent Core ---
 
 class UniversalLLMProvider:
-    """Connects the Python agent loop to Ollama, OpenAI, or Azure AI Foundry endpoints."""
+    """Connects the Python agent loop using the official OpenAI SDK."""
     
     def __init__(self, endpoint_url: str, model: str, api_key: Optional[str] = None):
         self.endpoint_url = endpoint_url
         self.model = model
-        self.api_key = api_key
-
-    def generate(self, context: List[Dict[str, str]], require_json: bool = True) -> Optional[str]:
-        payload = {
-            "model": self.model,
-            "messages": context,
-            "options": {
-                "num_ctx": 8192
-            }
-        }
         
-        # Support both Ollama and standard OpenAI/Azure JSON modes
-        if require_json:
-            payload["format"] = "json"
-            payload["response_format"] = { "type": "json_object" }
+        from openai import OpenAI
+        
+        # 🎯 FIX: Strip explicit routes universally so the SDK never double-appends them
+        base_url = endpoint_url.split("/chat/completions")[0].split("/responses")[0]
+        
+        # 1. Local Ollama Routing
+        if "127.0.0.1" in endpoint_url or "localhost" in endpoint_url or "11434" in endpoint_url:
+            self.client = OpenAI(base_url=base_url, api_key="ollama")
             
-        data = json.dumps(payload).encode('utf-8')
-        
-        headers = {'Content-Type': 'application/json'}
-        
-        # 🎯 NEW: Inject authentication headers if an API key is provided
-        if self.api_key and self.api_key.lower() not in ["none", ""]:
-            # Azure AI Foundry requires the 'api-key' header
-            headers['api-key'] = self.api_key
-            # We also include standard Bearer auth to make it universally compatible with OpenAI
-            headers['Authorization'] = f"Bearer {self.api_key}"
-        
-        max_retries = 3
-        backoff_seconds = 1.5
-        
-        for attempt in range(max_retries):
-            try:
-                req = urllib.request.Request(
-                    self.endpoint_url, 
-                    data=data,
-                    headers=headers,
-                    method='POST'
-                )
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    res_body = response.read().decode('utf-8')
-                    res_json = json.loads(res_body)
-                    
-                    # Azure/OpenAI return 'choices', Ollama returns 'message' directly
-                    if "choices" in res_json:
-                        return res_json["choices"][0]["message"]["content"]
-                    elif "message" in res_json:
-                        return res_json["message"]["content"]
-                    else:
-                        return json.dumps(res_json)
-                    
-            except urllib.error.URLError as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"❌ [Connection Error] Failed to reach provider: {e.reason}")
-                    raise RuntimeError(f"LLM Provider unreachable: {e.reason}")
+        # 2. Azure Foundry & Standard OpenAI Routing
+        else:
+            # Use Entra ID if Azure and no explicit key is provided (or if user typed 'entra')
+            if "azure.com" in endpoint_url and (not api_key or api_key.lower() in ["none", "", "entra"]):
+                from azure.identity import DefaultAzureCredential, get_bearer_token_provider
                 
-                logger.warning(f"⚠️ Proxy not ready (attempt {attempt + 1}/{max_retries}), retrying in {backoff_seconds}s...")
-                time.sleep(backoff_seconds)
-                backoff_seconds *= 2
+                # Fetch the Microsoft Entra token provider
+                token_provider = get_bearer_token_provider(
+                    DefaultAzureCredential(), "https://ai.azure.com/.default"
+                )
+                
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info("🔐 Azure Entra ID authentication enabled via OpenAI SDK.")
+                
+                # The OpenAI SDK natively accepts the token callable instead of a string!
+                self.client = OpenAI(base_url=base_url, api_key=token_provider)
+            else:
+                # Standard static API Key (OpenAI or Azure)
+                self.client = OpenAI(base_url=base_url, api_key=api_key or "sk-dummy")
+
+    def generate(self, context: list, require_json: bool = True) -> Optional[str]:
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # 🎯 Dynamic Routing: Use the new v1 Responses API if the user configured it
+            if "azure.com" in self.endpoint_url and "/responses" in self.endpoint_url:
+                # Note: The Responses API accepts 'input' instead of 'messages'
+                response = self.client.responses.create(
+                    model=self.model,
+                    input=context
+                )
+                # Parse the response based on Azure's v1 Responses API structure
+                try:
+                    return response.output[0].content[0].text
+                except (KeyError, IndexError, AttributeError):
+                    return str(getattr(response, 'output', response))
+                    
+            # 🎯 Default: Standard Chat Completions (OpenAI & Legacy Azure)
+            else:
+                kwargs = {
+                    "model": self.model,
+                    "messages": context,
+                }
+                if require_json:
+                    kwargs["response_format"] = { "type": "json_object" }
+                    
+                response = self.client.chat.completions.create(**kwargs)
+                return response.choices[0].message.content
+                
+        except Exception as e:
+            logger.error(f"❌ [SDK Connection Error] Failed to generate: {e}")
+            raise RuntimeError(f"LLM Provider unreachable: {e}")
 
 # --- Mock Implementation for Testing ---
 
