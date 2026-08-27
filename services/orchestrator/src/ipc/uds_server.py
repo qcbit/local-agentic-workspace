@@ -583,6 +583,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:
-        logger.info("Shutting down UDS server.")
-        if os.path.exists(server.socket_path):
-            os.remove(server.socket_path)
+        # 🎯 No file cleanup needed for TCP sockets!
+        logger.info("Shutting down TCP server gracefully.")

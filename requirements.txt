@@ -9,3 +9,5 @@ prompt_toolkit
 textual
 pyperclip
 pyinstaller
+openai
+azure-identity
