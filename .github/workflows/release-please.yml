@@ -82,7 +82,9 @@ jobs:
             --hidden-import rag.vector_store \
             --hidden-import agent.agent_loop \
             --collect-all fastembed \
-            --collect-all lancedb
+            --collect-all lancedb \
+            --collect-all openai \
+            --collect-all azure.identity
           
           # Move the compiled binary into the VS Code extension's bin folder
           mkdir -p apps/vscode-extension/bin
