@@ -83,6 +83,8 @@ export function activate(context: vscode.ExtensionContext) {
             env: { 
                 ...process.env, 
                 PYTHONUNBUFFERED: "1",
+                PYTHONIOENCODING: "utf-8", // 🎯 Forces UTF-8 for print() and logging
+                PYTHONUTF8: "1",           // 🎯 Forces UTF-8 for file operations
                 AGENTIC_WORKSPACE_ROOT: activeWorkspace,
                 PYTHONPATH: monorepoRoot
             }

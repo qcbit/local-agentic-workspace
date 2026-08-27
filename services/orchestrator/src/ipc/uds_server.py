@@ -11,6 +11,16 @@ import sys
 from typing import Any, Dict, Optional
 import uuid
 
+# 🎯 FAILSAFE: Force UTF-8 encoding on Windows to prevent emoji crashes
+if sys.stdout:
+    reconfigure = getattr(sys.stdout, 'reconfigure', None)
+    if callable(reconfigure):
+        reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr:
+    reconfigure = getattr(sys.stderr, 'reconfigure', None)
+    if callable(reconfigure):
+        reconfigure(encoding='utf-8', errors='replace')
+
 # 1. Grab the current fallback path
 workspace_root = os.getcwd()
 # Define a cross-platform default for the global config
