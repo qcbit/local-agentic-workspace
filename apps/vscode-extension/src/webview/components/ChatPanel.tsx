@@ -38,6 +38,12 @@ export const ChatPanel: React.FC = () => {
             if (message.command === 'agentThinking') {
                 setCurrentThought(message.text);
             } 
+            // Intercept proactive terminal errors and render them as user prompts
+            else if (message.command === 'injectMessage') {
+                setMessages(prev => [...prev, { role: 'user', content: message.text }]);
+                setIsLoading(true);
+                setCurrentThought("Initializing...");
+            }
             else if (message.command === 'agentResponse') {
                 setMessages(prev => [...prev, { role: 'agent', content: message.text }]);
                 setIsLoading(false);
@@ -48,7 +54,7 @@ export const ChatPanel: React.FC = () => {
                 setIsLoading(false);
                 setCurrentThought(""); 
             }
-            // 🎯 Reset UI if the agent was forcefully stopped
+            // 🛑 Reset UI if the agent was forcefully stopped
             else if (message.type === 'agent_stopped') {
                 setMessages(prev => [...prev, { role: 'error', content: 'Agent task was manually canceled.' }]);
                 setIsLoading(false);

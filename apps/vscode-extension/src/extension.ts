@@ -128,99 +128,6 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
         });
 
-    // ---------------------------------------------------------
-    // PROACTIVE AI: Terminal Error Watcher
-    // ---------------------------------------------------------
-    context.subscriptions.push(
-        vscode.window.onDidEndTerminalShellExecution(async (event) => {
-            const exitCode = event.exitCode;
-            
-            // If exitCode is undefined, the command was cancelled. 
-            // If it's > 0, the command failed.
-            if (exitCode !== undefined && exitCode > 0) {
-                const commandLine = event.execution.commandLine.value;
-                
-                // Ignore empty commands or simple typos that don't need AI
-                if (!commandLine.trim()) return;
-
-                console.log(`🚨 Terminal command failed: ${commandLine} (Exit Code: ${exitCode})`);
-
-                // Extract the terminal output stream
-                let terminalOutput = "";
-                try {
-                    // event.terminal.shellIntegration is required for this to work
-                    for await (const data of event.execution.read()) {
-                        terminalOutput += data;
-                    }
-                } catch (error) {
-                    console.error("Failed to read terminal output", error);
-                    terminalOutput = "Error reading terminal output stream.";
-                }
-
-                // Strip out excessive ANSI color codes for the LLM
-                const cleanOutput = terminalOutput.replace(/\x1b\[[0-9;]*m/g, '').trim();
-
-                // 🛡️ Interactive Auto-Fix Prompt
-                const userAction = await vscode.window.showErrorMessage(
-                    `Command failed (Exit ${exitCode}): ${commandLine}`,
-                    'Auto-Fix with Agent',
-                    'Dismiss'
-                );
-
-                if (userAction === 'Auto-Fix with Agent') {
-                    // Instruct the LLM to format commands predictably
-                    // Using Chain of Thought
-                    const autoFixPrompt = `My terminal command failed with exit code ${exitCode}.\n\n` +
-                                          `Command Executed:\n${commandLine}\n\n` +
-                                          `Terminal Output (stderr):\n${cleanOutput}\n\n` +
-                                          `Please diagnose the issue. CRITICAL INSTRUCTION: Consider the intent of the original command. If the command was a read-only or exploration command (like 'ls', 'cat', or 'echo'), DO NOT suggest creating missing files or directories unless absolutely necessary. Assume it was a typo and simply explain the error.\n\n` +
-                                          "If the issue requires executing a new or different terminal command to fix:" +
-                                                "1. Analyze the user's original intent and the current system context." +
-                                                "2. Reason through the proposed command and its potential system impacts." +
-                                                "3. If you lack high confidence in the command's safety or correctness, you must halt tool execution and ask the user for clarification before outputting the command."
-
-                    vscode.window.showInformationMessage("🧠 Agent is diagnosing the terminal error...");
-                    
-                    try {
-                        // Send the task to the agent orchestrator
-                        const response = await udsClient.request("execute_agent_task", { goal: autoFixPrompt });
-                        
-                        // Extract the final observation summary
-                        let summary = response.final_observation || response.summary || "Diagnosis complete.";
-                        
-                        // Check if the agent proposed a command to run
-                        const commandMatch = summary.match(/<command>(.*?)<\/command>/);
-                        
-                        if (commandMatch) {
-                            const proposedCommand = commandMatch[1].trim();
-                            
-                            // FIX: Replace the XML tags with markdown backticks so the command stays in the text!
-                            summary = summary.replace(/<command>(.*?)<\/command>/g, '`$1`').trim();
-                            
-                            // Show the diagnosis and provide a button to run the command
-                            const runAction = await vscode.window.showInformationMessage(
-                                `Agent Diagnosis: ${summary}`,
-                                `Run: ${proposedCommand}`,
-                                'Dismiss'
-                            );
-                            
-                            if (runAction === `Run: ${proposedCommand}`) {
-                                // 🚀 Bring the terminal to the front, then execute the fix
-                                event.terminal.show();
-                                event.terminal.sendText(proposedCommand);
-                            }
-                        } else {
-                            // Standard output if no command was proposed
-                            vscode.window.showInformationMessage(`Agent Diagnosis: ${summary}`, { modal: true });
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Agent failed to diagnose: ${err.message}`);
-                    }
-                }
-            }
-        })
-    );
-
     // We store the resolver here temporarily while the diff is open waiting for the user
     let pendingWriteResolve: ((value: { status: string }) => void) | null = null;
 
@@ -419,6 +326,53 @@ export function activate(context: vscode.ExtensionContext) {
     const chatProvider = new ChatViewProvider(context.extensionUri, udsClient);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatProvider)
+    );
+
+    // Rerouted Terminal Watcher
+    context.subscriptions.push(
+        vscode.window.onDidEndTerminalShellExecution(async (event) => {
+            const exitCode = event.exitCode;
+            // Ignore exit code 130 (User triggered Ctrl+C / SIGINT)
+            if (exitCode !== undefined && exitCode > 0 && exitCode !== 130) {
+                const commandLine = event.execution.commandLine.value;
+                if (!commandLine.trim()) return;
+
+                let terminalOutput = "";
+                try {
+                    for await (const data of event.execution.read()) {
+                        terminalOutput += data;
+                    }
+                } catch (error) {}
+
+                const cleanOutput = terminalOutput.replace(/\x1b\[[0-9;]*m/g, '').trim();
+                
+                // Suppress modal if the user manually interrupted the process
+                if (cleanOutput.includes('KeyboardInterrupt') || terminalOutput.includes('^C')) {
+                    console.log("🛑 Suppressing AI auto-fix for manual Ctrl+C termination.");
+                    return;
+                }
+
+                const outputContext = cleanOutput 
+                    ? `Terminal Output:\n${cleanOutput}` 
+                    : `The terminal output was not captured. You must execute this command yourself using 'terminal_proxy' to observe the error before fixing it.`;
+
+                const autoFixPrompt = `My terminal command failed with exit code ${exitCode}.\n\n` +
+                                      `Command Executed: \`${commandLine}\`\n\n` +
+                                      `${outputContext}\n\n` +
+                                      `Please diagnose the issue and help me fix it.`;
+
+                const userAction = await vscode.window.showErrorMessage(
+                    `Command failed: ${commandLine}`,
+                    'Send to Agent',
+                    'Dismiss'
+                );
+
+                if (userAction === 'Send to Agent') {
+                    // 🎯 Route directly into the chat sidebar's memory stream
+                    chatProvider.injectProactiveMessage(autoFixPrompt);
+                }
+            }
+        })
     );
 
     // 6. Initialize the AST Provider
