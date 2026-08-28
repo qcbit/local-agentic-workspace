@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.13...v0.2.0) (2026-08-28)
+
+
+### Features
+
+* **UX:** Implement new chat ([f77b5ef](https://github.com/qcbit/local-agentic-workspace/commit/f77b5ef68d3c3ccd5439a2925fe80b82b2562c56))
+* **UX:** Implement new chat ([22dc4f0](https://github.com/qcbit/local-agentic-workspace/commit/22dc4f090d4e894a23b35513f1a016c20912583a))
+
 ## [0.1.13](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.12...v0.1.13) (2026-08-28)
 
 
