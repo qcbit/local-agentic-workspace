@@ -17,7 +17,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     ) {
         this._view = webviewView;
 
-        // 1. Only authorize the 'out' directory
         webviewView.webview.options = {
             enableScripts: true,
             localResourceRoots: [
@@ -25,12 +24,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             ]
         };
 
-        // 2. Point directly to the newly isolated chat.js bundle
         const scriptUri = webviewView.webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, 'out', 'chat.js')
         );
 
-        // 3. Inject a completely clean HTML template without the missing icon
         webviewView.webview.html = `
             <!DOCTYPE html>
             <html lang="en">
@@ -46,10 +43,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             </html>
         `;
 
-        // Listen for the agent's inner monologue from the Unix Socket
+        // Listen for the agent's inner monologue from IPC
         this._udsClient.on('agentThinking', (message: string) => {
             if (this._view) {
-                // Pipe the thought directly to the React frontend
                 this._view.webview.postMessage({ 
                     command: 'agentThinking', 
                     text: message 
@@ -57,37 +53,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             }
         });
 
-        // Listen for the prompt from React, send it to Python via IPC
+        // Listen for user actions from the React webview
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.command || data.type) {
                 case 'executeTask':
-                    try {
-                        // Map the React state (autoApprove) to the Python expected key (auto_approve)
-                        const payload = {
-                            goal: data.goal,
-                            auto_approve: data.autoApprove 
-                        };
-                        const result = await this._udsClient.request('execute_agent_task', payload);
-
-                        // Parse agent observation to string
-                        let responseText = "Task completed.";
-                        if (result && result.final_observation) {
-                            responseText = result.final_observation;
-                        } else if (result) {
-                            responseText = JSON.stringify(result, null, 2);
-                        }
-
-                        // Send the result back to React
-                        webviewView.webview.postMessage({ command: 'agentResponse', text: responseText });
-                    } catch (error: any) {
-                        webviewView.webview.postMessage({ command: 'agentError', text: error.message || 'Error communicating with orchestrator.' });
-                    }
+                    await this._executeTask(data.goal, data.autoApprove ?? false);
                     break;
                 case 'stop_agent':
                     console.log("🛑 Received stop signal from UI. Routing to IPC...");
                     if (this._udsClient) {
                         this._udsClient.cancelTask();
-                        // Optional: Send a message back to React to immediately reset the UI loading state
                         webviewView.webview.postMessage({ type: 'agent_stopped' });
                     }
                     break;
@@ -95,36 +70,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
-    private _getHtmlForWebview(scriptUri: vscode.Uri) {
-        return `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Agent Chat</title>
-        </head>
-        <body>
-            <!-- This will catch and print any React/JS crashes directly to the sidebar! -->
-            <div id="error-output" style="color: #ff6b6b; font-family: monospace; padding: 10px; font-weight: bold; white-space: pre-wrap;"></div>
+    /**
+     * Executes an agent task via the IPC socket and returns the result to the UI.
+     */
+    private async _executeTask(goal: string, autoApprove: boolean = false) {
+        if (!this._view) return;
+
+        try {
+            const payload = {
+                goal: goal,
+                auto_approve: autoApprove
+            };
+            const result = await this._udsClient.request('execute_agent_task', payload);
+
+            let responseText = "Task completed.";
+            if (result && result.final_observation) {
+                responseText = result.final_observation;
+            } else if (result) {
+                responseText = JSON.stringify(result, null, 2);
+            }
+
+            this._view.webview.postMessage({ command: 'agentResponse', text: responseText });
+        } catch (error: any) {
+            this._view.webview.postMessage({ 
+                command: 'agentError', 
+                text: error.message || 'Error communicating with orchestrator.' 
+            });
+        }
+    }
+
+    /**
+     * Proactively injects a prompt into the chat stream from external events (e.g. terminal errors).
+     */
+    public injectProactiveMessage(message: string) {
+        if (this._view) {
+            // Display the injected prompt in the React message list
+            this._view.webview.postMessage({ command: 'injectMessage', text: message });
             
-            <div id="root"></div>
-            
-            <script>
-                // Catch standard errors
-                window.onerror = function(message, source, lineno, colno, error) {
-                    document.getElementById('error-output').textContent += '🚨 ERROR: ' + message + '\\n';
-                    return false;
-                };
-                // Catch promise rejections
-                window.addEventListener('unhandledrejection', function(event) {
-                    document.getElementById('error-output').textContent += '🚨 PROMISE REJECTION: ' + (event.reason.stack || event.reason) + '\\n';
-                });
-            </script>
-            
-            <script src="${scriptUri}"></script>
-        </body>
-        </html>
-    `;
+            // Dispatch the task execution directly to the orchestrator
+            this._executeTask(message, false);
+        } else {
+            vscode.commands.executeCommand('localAgenticWorkspace.chatView.focus').then(() => {
+                setTimeout(() => this.injectProactiveMessage(message), 500);
+            });
+        }
     }
 }
