@@ -13,7 +13,7 @@ setup:
 	@echo "Setting up local development environment..."
 	@bash scripts/bootstrap.sh
 
-dev:
+dev: build-frontend
 	@echo "Starting local orchestrator daemon..."
 	@python3 services/orchestrator/src/ipc/uds_server.py
 
@@ -42,15 +42,18 @@ clean-full: clean
 	@rm -rf apps/vscode-extension/bin
 	@echo "🧹 Cleaning up old VS Code extension cache..."
 
+build-frontend:
+	@echo "Transpiling the frontend..."
+	@echo "Compiling the React/TS frontend..."
+	@cd apps/vscode-extension && npm run compile
+
 build-backend:
 	@echo "Compiling the PyInstaller binary using the spec file..."
 	@pyinstaller uds_server-macos-arm64.spec --clean
 	@mkdir -p apps/vscode-extension/bin
 	@cp dist/uds_server-macos-arm64 apps/vscode-extension/bin/uds_server-macos-arm64
 
-package: build-backend
-	@echo "Compiling the React/TS frontend..."
-	@cd apps/vscode-extension && npm run compile
+package: build-frontend build-backend
 	@echo "Packaging the VS Code extension..."
 	@cd apps/vscode-extension && npx vsce package
 
