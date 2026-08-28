@@ -1,10 +1,14 @@
 import asyncio
+import azure.identity
 import collections.abc
 import hashlib
+import httpx
 import json
 import logging
+import openai
 import os
 from pathlib import Path
+import pydantic
 import socket
 import stat
 import sys
