@@ -687,16 +687,21 @@ class UniversalLLMProvider:
         self.endpoint_url = endpoint_url
         self.model = model
         
+        import httpx
         from openai import OpenAI
-        
+        import os
+
         # 🎯 FIX: Strip explicit routes universally so the SDK never double-appends them
         base_url = endpoint_url.split("/chat/completions")[0].split("/responses")[0]
+
+        proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
         
-        # 1. Local Ollama Routing
+        # Local Ollama Routing
         if "127.0.0.1" in endpoint_url or "localhost" in endpoint_url or "11434" in endpoint_url:
-            self.client = OpenAI(base_url=base_url, api_key="ollama")
+            self.client = OpenAI(base_url=base_url, api_key="ollama", http_client=http_client)
             
-        # 2. Azure Foundry & Standard OpenAI Routing
+        # Azure Foundry & Standard OpenAI Routing
         else:
             # Use Entra ID if Azure and no explicit key is provided (or if user typed 'entra')
             if "azure.com" in endpoint_url and (not api_key or api_key.lower() in ["none", "", "entra"]):
@@ -712,10 +717,10 @@ class UniversalLLMProvider:
                 logger.info("🔐 Azure Entra ID authentication enabled via OpenAI SDK.")
                 
                 # The OpenAI SDK natively accepts the token callable instead of a string!
-                self.client = OpenAI(base_url=base_url, api_key=token_provider)
+                self.client = OpenAI(base_url=base_url, api_key=token_provider, http_client=http_client)
             else:
                 # Standard static API Key (OpenAI or Azure)
-                self.client = OpenAI(base_url=base_url, api_key=api_key or "sk-dummy")
+                self.client = OpenAI(base_url=base_url, api_key=api_key or "sk-dummy", http_client=http_client)
 
     def generate(self, context: list, require_json: bool = True) -> Optional[str]:
         import logging
