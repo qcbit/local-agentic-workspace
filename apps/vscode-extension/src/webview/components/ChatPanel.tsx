@@ -5,8 +5,17 @@ declare const acquireVsCodeApi: any;
 // Safely acquire the API only if it hasn't been acquired yet
 const vscode = (window as any).vscodeApi || ((window as any).vscodeApi = acquireVsCodeApi());
 
-// 1. Fetch the saved state BEFORE initializing the component
+type ChatSession = {
+    id: string;
+    title: string;
+    messages: { role: string; content: string }[];
+    timestamp: number;
+};
+
+// Update previousState extraction
 const previousState = vscode.getState() || { 
+    sessions: [],
+    currentSessionId: Date.now().toString(),
     messages: [], 
     input: '', 
     isAutoApprove: false,
@@ -21,6 +30,10 @@ export const ChatPanel: React.FC = () => {
     const [isLoading, setIsLoading] = useState<boolean>(false); // Always start unlocked, ignoring previousState.isLoading
     const [currentThought, setCurrentThought] = useState<string>("");
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const [sessions, setSessions] = useState<ChatSession[]>(previousState.sessions || []);
+    const [currentSessionId, setCurrentSessionId] = useState<string>(previousState.currentSessionId || Date.now().toString());
+    const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+    const [searchQuery, setSearchQuery] = useState("");
 
     // 3. Save to VS Code's internal state manager whenever these values change
     useEffect(() => {
@@ -36,6 +49,7 @@ export const ChatPanel: React.FC = () => {
         const handler = (event: MessageEvent) => {
             const message = event.data;
             if (message.command === 'agentThinking') {
+                setMessages(prev => [...prev, { role: 'thought', content: message.text }]);
                 setCurrentThought(message.text);
             } 
             // Intercept proactive terminal errors and render them as user prompts
@@ -65,6 +79,31 @@ export const ChatPanel: React.FC = () => {
         return () => window.removeEventListener('message', handler);
     }, []);
 
+    const saveCurrentSession = () => {
+        if (messages.length === 0) return;
+        const title = messages.find(m => m.role === 'user')?.content.substring(0, 30) || "New Chat";
+        setSessions(prev => {
+            const existing = prev.filter(s => s.id !== currentSessionId);
+            return [{ id: currentSessionId, title, messages, timestamp: Date.now() }, ...existing];
+        });
+    };
+
+    const handleNewChat = () => {
+        saveCurrentSession();
+        setMessages([]);
+        setCurrentSessionId(Date.now().toString());
+        setIsHistoryOpen(false);
+        vscode.postMessage({ type: 'reset_session' });
+    };
+
+    const loadSession = (session: ChatSession) => {
+        saveCurrentSession();
+        setMessages(session.messages);
+        setCurrentSessionId(session.id);
+        setIsHistoryOpen(false);
+        // Send history to Python to rebuild AgentState
+        vscode.postMessage({ type: 'restore_session', messages: session.messages });
+    };
     const handleSend = () => {
         if (!input.trim() || isLoading) return;
         
@@ -113,8 +152,38 @@ export const ChatPanel: React.FC = () => {
         setMessages(prev => [...prev, { role: 'error', content: '🛑 Agent task forcefully aborted.' }]);
     };
 
+    const filteredSessions = sessions.filter(s => 
+        s.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+        s.messages.some(m => m.content.toLowerCase().includes(searchQuery.toLowerCase()))
+    );
+
     return (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', padding: '10px', boxSizing: 'border-box' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '10px' }}>
+                <button onClick={() => setIsHistoryOpen(!isHistoryOpen)}>📜 History</button>
+                <button onClick={handleNewChat}>➕ New Chat</button>
+            </div>
+
+            {isHistoryOpen && (
+                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: 'var(--vscode-editor-background)', zIndex: 10, padding: '10px', display: 'flex', flexDirection: 'column' }}>
+                    <button onClick={() => setIsHistoryOpen(false)} style={{ alignSelf: 'flex-end' }}>❌ Close</button>
+                    <input 
+                        type="text" 
+                        placeholder="Search history..." 
+                        value={searchQuery} 
+                        onChange={(e) => setSearchQuery(e.target.value)} 
+                        style={{ margin: '10px 0', padding: '5px' }}
+                    />
+                    <div style={{ overflowY: 'auto', flex: 1 }}>
+                        {filteredSessions.map(s => (
+                            <div key={s.id} onClick={() => loadSession(s)} style={{ padding: '10px', borderBottom: '1px solid gray', cursor: 'pointer' }}>
+                                <strong>{s.title}</strong>
+                                <div style={{ fontSize: '10px', opacity: 0.7 }}>{new Date(s.timestamp).toLocaleString()}</div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
             <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', paddingBottom: '10px' }}>
                 {messages.length === 0 && (
                     <div style={{ opacity: 0.5, textAlign: 'center', marginTop: '2rem' }}>
@@ -122,23 +191,39 @@ export const ChatPanel: React.FC = () => {
                     </div>
                 )}
                 {messages.map((msg, i) => (
-                    <div key={i} style={{
-                        padding: '8px 12px', 
-                        borderRadius: '6px',
-                        backgroundColor: msg.role === 'user' ? 'var(--vscode-button-background)' : 'var(--vscode-editor-inactiveSelectionBackground)',
-                        color: msg.role === 'user' ? 'var(--vscode-button-foreground)' : 'var(--vscode-editor-foreground)',
-                        alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                        maxWidth: '90%',
-                        whiteSpace: 'pre-wrap',
-                        wordWrap: 'break-word'
-                    }}>
-                        {msg.role === 'error' ? '❌ ' : ''}{msg.content}
-                    </div>
+                    msg.role === 'thought' ? (
+                        // 🎯 Distinct styling for intermediate reasoning steps
+                        <div key={i} style={{
+                            alignSelf: 'flex-start', 
+                            opacity: 0.7, 
+                            fontStyle: 'italic', 
+                            padding: '4px 12px',
+                            fontSize: '0.9em',
+                            whiteSpace: 'pre-wrap',
+                            wordWrap: 'break-word'
+                        }}>
+                            {msg.content}
+                        </div>
+                    ) : (
+                        // Standard styling for user, agent, and error messages
+                        <div key={i} style={{
+                            padding: '8px 12px', 
+                            borderRadius: '6px',
+                            backgroundColor: msg.role === 'user' ? 'var(--vscode-button-background)' : 'var(--vscode-editor-inactiveSelectionBackground)',
+                            color: msg.role === 'user' ? 'var(--vscode-button-foreground)' : 'var(--vscode-editor-foreground)',
+                            alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                            maxWidth: '90%',
+                            whiteSpace: 'pre-wrap',
+                            wordWrap: 'break-word'
+                        }}>
+                            {msg.role === 'error' ? '❌ ' : ''}{msg.content}
+                        </div>
+                    )
                 ))}
                 
-                {isLoading && currentThought && (
+                {isLoading && (
                     <div style={{ alignSelf: 'flex-start', opacity: 0.7, fontStyle: 'italic', padding: '8px 12px' }}>
-                        <span className="spinner">🌀</span> {currentThought}
+                        <span className="spinner">⚙️</span> {currentThought || "Thinking..."}
                     </div>
                 )}
             </div>
@@ -156,6 +241,7 @@ export const ChatPanel: React.FC = () => {
             </div>
                 
             <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', alignItems: 'flex-end' }}>
+                {/* Multiline input */}
                 <textarea 
                     ref={textareaRef}
                     value={input}

@@ -117,7 +117,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc --noEmit && npm run build:extension && npm run build:webview",
     "watch": "npm run watch:extension & npm run watch:webview",
-    "watch:extension": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --watch",
+    "watch:extension": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --watch=forever",
     "watch:webview": "node esbuild.webview.js --watch",
     "test": "mocha -r ts-node/register \"test/**/*.spec.ts\"",
     "build:webview": "node esbuild.webview.js",

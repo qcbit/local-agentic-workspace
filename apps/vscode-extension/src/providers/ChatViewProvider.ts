@@ -66,6 +66,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                         webviewView.webview.postMessage({ type: 'agent_stopped' });
                     }
                     break;
+                case 'reset_session':
+                    this._udsClient.request('reset_session', {});
+                    break;
+                case 'restore_session':
+                    this._udsClient.request('restore_session', { history: data.messages });
+                    break;
             }
         });
     }
@@ -102,16 +108,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     /**
      * Proactively injects a prompt into the chat stream from external events (e.g. terminal errors).
      */
-    public injectProactiveMessage(message: string) {
+    public injectProactiveMessage(displayText: string, executionText: string) {
         if (this._view) {
-            // Display the injected prompt in the React message list
-            this._view.webview.postMessage({ command: 'injectMessage', text: message });
+            // Display the clean prompt in the React message list
+            this._view.webview.postMessage({ command: 'injectMessage', text: displayText });
             
-            // Dispatch the task execution directly to the orchestrator
-            this._executeTask(message, false);
+            // Dispatch the hidden, rule-heavy task directly to the orchestrator
+            this._executeTask(executionText, false);
         } else {
             vscode.commands.executeCommand('localAgenticWorkspace.chatView.focus').then(() => {
-                setTimeout(() => this.injectProactiveMessage(message), 500);
+                setTimeout(() => this.injectProactiveMessage(displayText, executionText), 500);
             });
         }
     }
