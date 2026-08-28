@@ -356,10 +356,15 @@ export function activate(context: vscode.ExtensionContext) {
                     ? `Terminal Output:\n${cleanOutput}` 
                     : `The terminal output was not captured. You must execute this command yourself using 'terminal_proxy' to observe the error before fixing it.`;
 
-                const autoFixPrompt = `My terminal command failed with exit code ${exitCode}.\n\n` +
+                // 🎯 A clean, natural sentence for the Chat UI
+                const displayPrompt = `Diagnose terminal error: \`${commandLine}\``;
+
+                // 🎯 The heavy diagnostic context for the LLM
+                const executionPrompt = `My terminal command failed with exit code ${exitCode}.\n\n` +
                                       `Command Executed: \`${commandLine}\`\n\n` +
                                       `${outputContext}\n\n` +
-                                      `Please diagnose the issue and help me fix it.`;
+                                      `Please diagnose the issue and help me fix it. ` +
+                                      `CRITICAL SANDBOX RULES: You cannot use commands like 'history', 'sudo', or 'nano'. You cannot read files outside the active workspace root. Your Python REPL strictly blocks 'os', 'sys', and 'subprocess'. Base your diagnosis strictly on the provided output.`;
 
                 const userAction = await vscode.window.showErrorMessage(
                     `Command failed: ${commandLine}`,
@@ -368,8 +373,8 @@ export function activate(context: vscode.ExtensionContext) {
                 );
 
                 if (userAction === 'Send to Agent') {
-                    // 🎯 Route directly into the chat sidebar's memory stream
-                    chatProvider.injectProactiveMessage(autoFixPrompt);
+                    // 🎯 Pass the clean text to the UI, and the heavy text to the backend
+                    chatProvider.injectProactiveMessage(displayPrompt, executionPrompt);
                 }
             }
         })

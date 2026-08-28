@@ -57,8 +57,13 @@ for path in (src_dir, workspace_root):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+# Added here to prevent ModuleNotFoundError because 
+# uds_server.py is executedly directly during dev mod
+# and is buried deep inside the ipc folder where Python 
+# does not naturally know about the services directory
+# until the internal sys.path.insert logic executes.
 from rag.vector_store import LocalVectorStore
-from services.orchestrator.src.agent.agent_loop import Agent, UniversalLLMProvider
+from services.orchestrator.src.agent.agent_loop import Agent, UniversalLLMProvider, Message, Role
 
 # 🎯 Write logs to both the VS Code output panel AND a persistent file
 log_file = os.path.expanduser("~/.agentic_backend.log")
@@ -393,6 +398,30 @@ class JsonRpcUdsServer:
                 return self._success_response(req_id, self._handle_sync_file(params))
             elif method == "search_codebase":
                 return self._success_response(req_id, self._handle_search_codebase(params))
+            elif method == "reset_session":
+                self.persistent_agent = None
+                logger.info("🗑️ Agent memory wiped for new session.")
+                return self._success_response(req_id, {"status": "cleared"})
+                
+            elif method == "restore_session":
+                self._ensure_agent()
+                
+                # Map React UI messages to Python backend Role messages
+                restored_history = []
+                for msg in params.get("history", []):
+                    role_str = msg.get("role")
+                    content = msg.get("content", "")
+                    
+                    if role_str == "error":
+                        continue  # Skip local UI errors
+                        
+                    # Map the frontend 'agent' role to the backend Role.ASSISTANT enum
+                    backend_role = Role.ASSISTANT if role_str == "agent" else Role.USER
+                    restored_history.append(Message(role=backend_role, content=content))
+                    
+                self.persistent_agent.state.history = restored_history
+                logger.info(f"⏪ Restored {len(restored_history)} messages to agent memory.")
+                return self._success_response(req_id, {"status": "restored"})
             else:
                 return self._error_response(req_id, -32601, f"Method '{method}' not found")
                 
@@ -418,74 +447,35 @@ class JsonRpcUdsServer:
 
         return {"status": "success", "indexed_path": file_path}
 
-    async def _run_agent_async(self, goal: str, auto_approve: bool = False):
-        """Asynchronously instantiates and runs the agent."""
-        
-        # 1. Determine which profile is active
-        active_profile_name = self.config.get("active_profile", "home")
-        
-        # 2. Extract profiles and rigidly enforce that it MUST be a dictionary
-        profiles = self.config.get("profiles", {})
-        if not isinstance(profiles, dict):
-            profiles = {}
-            
-        # 3. Safely extract the active config (fallback to the root dict if flat)
-        if not isinstance(active_profile_name, str):
-            active_profile_name = "home"
-            
-        active_config = profiles.get(active_profile_name, self.config)
-        if not isinstance(active_config, dict):
-            active_config = self.config
-        
-        # 4. Extract LLM settings (fallback to active_config if 'llm' key is missing)
-        llm_config = active_config.get("llm", active_config)
-        if not isinstance(llm_config, dict):
-            llm_config = active_config
-        
-        # 5. Bulletproof extraction: check for both the new and old UI keys
-        endpoint = (
-            llm_config.get("endpoint_url") or 
-            llm_config.get("endpoint") or 
-            self.config.get("endpoint_url") or 
-            self.config.get("endpoint")
-        )
-        
-        model_name = (
-            llm_config.get("model_name") or 
-            llm_config.get("model") or 
-            self.config.get("model_name") or 
-            self.config.get("model")
-        )
+    def _ensure_agent(self):
+        """Initializes the persistent agent if it doesn't exist."""
+        if self.persistent_agent is not None:
+            return
 
-        api_key = (
-            llm_config.get("apiKey") or 
-            llm_config.get("api_key") or 
-            self.config.get("apiKey") or 
-            self.config.get("api_key")
-        )
+        active_profile_name = self.config.get("active_profile", "home")
+        profiles = self.config.get("profiles", {})
+        active_config = profiles.get(active_profile_name, self.config) if isinstance(profiles, dict) else self.config
         
-        # 🛡️ Failsafe: Auto-correct naked Ollama URLs to the chat completions path
+        llm_config = active_config.get("llm", active_config)
+        
+        endpoint = (llm_config.get("endpoint_url") or llm_config.get("endpoint") or 
+                   self.config.get("endpoint_url") or self.config.get("endpoint"))
+        model_name = (llm_config.get("model_name") or llm_config.get("model") or 
+                     self.config.get("model_name") or self.config.get("model"))
+        api_key = (llm_config.get("apiKey") or llm_config.get("api_key") or 
+                  self.config.get("apiKey") or self.config.get("api_key"))
+
         if endpoint and endpoint.endswith("11434"):
             endpoint = f"{endpoint}/v1/chat/completions"
 
-        if not endpoint or not model_name:
-            raise ValueError(f"Missing endpoint or model in workspace config. Current config state: {self.config}")
+        llm = UniversalLLMProvider(endpoint_url=endpoint, model=model_name, api_key=api_key)
         
-        # 🎯 ONLY instantiate the agent if it doesn't exist yet
-        if self.persistent_agent is None:
-            llm = UniversalLLMProvider(
-                endpoint_url=endpoint,
-                model=model_name,
-                api_key=api_key
-            )
-            
-            self.persistent_agent = Agent(
-                llm_provider=llm, 
-                config=active_config, 
-                uds_server=self, 
-                workspace_root=workspace_root
-            )
+        # workspace_root is defined globally at the top of uds_server.py
+        self.persistent_agent = Agent(llm_provider=llm, config=active_config, uds_server=self, workspace_root=workspace_root)
 
+    async def _run_agent_async(self, goal: str, auto_approve: bool = False):
+        """Asynchronously instantiates and runs the agent."""
+        self._ensure_agent()
         state = await self.persistent_agent.run(goal, auto_approve=auto_approve)
         return state
 
