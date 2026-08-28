@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.11...v0.1.12) (2026-08-28)
+
+
+### Bug Fixes
+
+* **vscode-extension:** trigger manual release build ([bfaa0c9](https://github.com/qcbit/local-agentic-workspace/commit/bfaa0c9d99cfbcab31d621d3869fa4dd2bb1f9cf))
+
 ## [0.1.11](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.10...v0.1.11) (2026-08-28)
 
 
