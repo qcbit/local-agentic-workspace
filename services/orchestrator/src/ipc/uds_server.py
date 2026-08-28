@@ -1,6 +1,7 @@
 import asyncio
 import azure.identity
 import collections.abc
+import copy
 import hashlib
 import httpx
 import json
@@ -168,13 +169,21 @@ class JsonRpcUdsServer:
                 if not data:
                     break
 
-                print(f"🕵️ [RAW SOCKET] {data.decode('utf-8').strip()}")
-                
                 payload = data.decode('utf-8').strip()
                 if not payload:
                     continue
                     
                 req = json.loads(payload)
+
+                # 🛡️ SANITIZE LOGS: Mask the API key before printing
+                safe_req = copy.deepcopy(req)
+                if safe_req.get("method") == "update_config":
+                    llm_settings = safe_req.get("params", {}).get("profile_settings", {}).get("llm", {})
+                    for key in ["api_key", "apiKey"]:
+                        if llm_settings.get(key) not in [None, "", "none", "entra"]:
+                            llm_settings[key] = "********"
+                
+                print(f"🕵️ [RAW SOCKET] {json.dumps(safe_req)}")
 
                 # --- Smart Client Routing ---
                 # Only designate the connection as the VS Code Extension Host if it sends editor-specific commands.
