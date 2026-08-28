@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.12...v0.1.13) (2026-08-28)
+
+
+### Bug Fixes
+
+* **frontend:** Unable to interact with agent regarding terminal. ([940e310](https://github.com/qcbit/local-agentic-workspace/commit/940e3104fceba933948fc38ef1b36bb6345cbdcd))
+
 ## [0.1.12](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.11...v0.1.12) (2026-08-28)
 
 
