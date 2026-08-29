@@ -394,7 +394,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 8. Register the AST Test Command (from Task 2.2)
     const testAstCommand = vscode.commands.registerCommand('localAgentic.testAST', async () => {
-        const editor = vscode.window.activeTextEditor;
+        let editor = vscode.window.activeTextEditor;
+        if (!editor && vscode.window.visibleTextEditors.length > 0) {
+            editor = vscode.window.visibleTextEditors.find(e => e.document.uri.scheme === 'file');
+        }
+
         if (!editor) {
             vscode.window.showErrorMessage('No active editor found to parse.');
             return;
@@ -419,7 +423,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 9. Register the Semantic Diff Command
     const showDiffCommand = vscode.commands.registerCommand('localAgentic.showProposedDiff', async () => {
-        const editor = vscode.window.activeTextEditor;
+        let editor = vscode.window.activeTextEditor;
+        if (!editor && vscode.window.visibleTextEditors.length > 0) {
+            editor = vscode.window.visibleTextEditors.find(e => e.document.uri.scheme === 'file');
+        }
         if (!editor) {
             vscode.window.showErrorMessage('No active editor found to diff against.');
             return;
