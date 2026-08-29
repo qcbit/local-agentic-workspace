@@ -2,94 +2,146 @@
 
 ## Description
 
-A powerful, privacy-first VS Code extension that integrates an autonomous, self-correcting AI agent directly into your local development environment. Built for speed and security, this extension relies entirely on local compute, utilizing a Python-based orchestrator, Unix Domain Sockets (UDS) for low-latency IPC, and local LLMs.
+A powerful, privacy-first VS Code extension that integrates an autonomous, self-correcting AI agent directly into your local development environment. Built for speed and security, this extension relies entirely on local compute, utilizing a Python-based orchestrator, TCP sockets for low-latency IPC, and local LLMs.
 
 ## 🚀 Features
 
-**Autonomous Agent Loop**: A fault-tolerant, self-correcting AI agent capable of reasoning through codebase issues, patching code, and handling its own formatting or tool-call errors on the fly.
+* **Autonomous Agent Loop**: A fault-tolerant, self-correcting AI agent capable of reasoning through codebase issues, patching code, and handling its own formatting or tool-call errors on the fly.
 
-**Proactive Error Interception**: Automatically monitors the VS Code integrated terminal. If a command fails (e.g., non-zero exit code), the agent intercepts the error output and proposes a fix.
+* **Proactive Error Interception**: Automatically monitors the VS Code integrated terminal. If a command fails (e.g., non-zero exit code), the agent intercepts the error output and proposes a fix.
 
-**Lightning-Fast IPC**: Utilizes JSON-RPC 2.0 over Unix Domain Sockets (/tmp/agent.sock) for seamless, zero-network-overhead communication between the VS Code extension host and the Python orchestrator.
+* **Lightning-Fast IPC**: Utilizes JSON-RPC 2.0 over a local TCP socket (`127.0.0.1:7777`) for seamless communication between the VS Code extension host and the Python orchestrator.
+* **Semantic Search & RAG**: Real-time file syncing and codebase indexing powered by a local LanceDB vector store for sub-100ms semantic search.
 
-**Semantic Search & RAG**: Real-time file syncing and codebase indexing powered by a local LanceDB vector store for sub-100ms semantic search.
 
-**Interactive CodeLens Approvals**: AI-proposed file modifications are routed to a native VS Code Diff View, allowing the developer to review, approve, or reject changes via CodeLens before anything is written to disk.
+* **Interactive CodeLens Approvals**: AI-proposed file modifications are routed to a native VS Code Diff View, allowing the developer to review, approve, or reject changes via CodeLens before anything is written to disk.
 
-**Dynamic Workspace Profiles**: A React-based webview for real-time configuration syncing, allowing seamless swapping between different local models (e.g., qwen2.5-coder, llama3) and context windows.
+
+* **Dynamic Workspace Profiles**: A React-based webview for real-time configuration syncing, allowing seamless swapping between different local models (e.g., qwen2.5-coder, llama3) and context windows.
+
+
 
 ## 🏗️ Architecture
 
+
+
 This project utilizes a dual-stack architecture to separate the editor UI from the heavy AI orchestration:
 
-**Frontend (VS Code Extension)**: Written in TypeScript and Node.js. Manages the UI, webviews (React), text document syncing, and the Warp Proxy Server.
+* **Frontend (VS Code Extension)**: Written in TypeScript and Node.js. Manages the UI, webviews (React), text document syncing, and the Warp Proxy Server.
 
-**Backend (Orchestrator)**: Written in Python. Hosts the Agent Loop, LanceDB vector store, and the Tool Registry.
 
-**Inference Engine**: Powered by Ollama, optimized for local execution on Apple Silicon (M-series) or standard GPU hardware.
+* **Backend (Orchestrator)**: Written in Python. Hosts the Agent Loop, LanceDB vector store, and the Tool Registry.
+
+
+* **Inference Engine**: Powered by Ollama, optimized for local execution on Apple Silicon (M-series) or standard GPU hardware.
+
+
 
 ## 📋 Prerequisites
 
+
+
 Before running the extension in development mode, ensure you have the following installed:
 
-- VS Code (latest version)
-- Node.js (v18+)
-- Python (3.10+)
-- Ollama running locally.
+* VS Code (latest version)
+
+
+* Node.js (v18+)
+
+
+* Python (3.10+)
+
+
+* Make (for build scripts)
+* Ollama running locally.
+
+
 
 ## 🛠️ Development Setup
 
-Currently, the extension runs in a split development environment.
+
 
 ### 1. Prepare the Local LLM
 
+
+
 Ensure Ollama is running and pull your preferred models. A quantized 14B model is recommended for the best balance of reasoning and speed.
 
-```Bash
+```bash
 ollama run qwen2.5-coder:14b-instruct-q4_K_M
+
 ```
 
-### 2. Start the Python Orchestrator
+### 2. Start Development Watchers
 
-Navigate to the Python backend directory, install dependencies, and boot the UDS server.
+Open the repository root in your terminal and run the unified make command to install dependencies and start the TypeScript/React background watchers.
 
-```Bash
-pip install -r requirements.txt
-cd services/orchestrator
-python src/uds_server.py
+```bash
+make dev
+
 ```
 
-Note: The server will bind to /tmp/agent.sock. Ensure you have the necessary write permissions.
+### 3. Launch the Extension
 
-### 3. Launch the VS Code Extension
-
-Open the repository root in a new VS Code window.
-
-```Bash
-npm install
-```
-
-Press F5 to compile the TypeScript extension and launch the Extension Development Host.
+With `make dev` running in the background, open the repository in VS Code and press **F5**. The extension will automatically detect Development Mode and launch the Python orchestrator daemon on `127.0.0.1:7777`.
 
 ## ⚙️ Configuration
 
-The extension maintains its state in services/orchestrator/config.json.
+
+
+The extension maintains its state in a `.agentic_config.json` file, which can exist at the workspace root or globally at `~/.agentic_config.json`.
 
 To update settings via the UI:
 
-1. Click the Agentic Workspace item in the VS Code Status Bar (bottom right). 
+1. Click the Agentic Workspace item in the VS Code Status Bar (bottom right).
+
+
 2. The React Settings Panel will fetch the current configuration from the backend.
+
+
 3. Select your active profile, target model, and context window.
+
+
 4. Click Sync to Orchestrator.
+
+
+
+**Endpoint URL Tips:**
+
+* **Ollama Native:** If using Ollama, ensure your endpoint points to the chat completions path: `[http://127.0.0.1:11434/v1/chat/completions](http://127.0.0.1:11434/v1/chat/completions)`. The orchestrator will automatically attempt to append this if you only provide the base port.
+* **Azure/Enterprise Proxy:** If routing through an enterprise proxy, use the full deployment URL and ensure the API key is configured correctly in your profile settings.
+
+## 🧠 Recommended Local Models
+
+When configuring your `localAgenticWorkspace.memory.maxTokens` setting, refer to this table to ensure you give the agent enough room to read files without triggering context amnesia.
+
+| Model (Ollama Tag) | Parameters | Native Context Window | Recommended `maxTokens` Setting |
+| --- | --- | --- | --- |
+| `qwen2.5-coder:14b` | 14B | 32,768 | 24000 |
+| `qwen2.5-coder:7b` | 7B | 32,768 | 24000 |
+| `llama3:8b` | 8B | 8,192 | 6000 |
+| `mistral:7b` | 7B | 8,192 | 6000 |
+| `deepseek-coder-v2` | 16B | 32,768 | 24000 |
+
+## 🚑 Troubleshooting
+
+* **Context Limit Reached (Amnesia Loop):** If the agent repeatedly loops on a task and the logs show `Summarizing and dropping old messages...`, the agent's memory is full. Increase your `maxTokens` limit in the settings to accommodate larger files (e.g., bump to `24000` for Qwen models).
+* **Blank Chat Webview:** If the React chat panel loads entirely white, the VS Code state cache may be poisoned. Run `make dev` to ensure the webview bundle is compiled, then run the `Developer: Reload Window` command in VS Code.
+* **Port 7777 in Use:** If the backend fails to spawn, a previous orphaned Python process may be holding the TCP socket open. Terminate the process manually using `lsof -i :7777` and `kill -9 <PID>`.
 
 ## 🛡️ Privacy & Security
 
+
+
 This extension is designed to be 100% air-gapped.
 
-**No Telemetry**: No data is sent to external servers when using a local model.
+* **No Telemetry**: No data is sent to external servers when using a local model.
 
-**Local Inference**: All LLM prompts and codebase context are processed locally via Ollama.
 
-**Local Vector DB**: LanceDB runs strictly on the host machine.
+* **Local Inference**: All LLM prompts and codebase context are processed locally via Ollama.
 
-**Explicit Approvals**: The agent cannot write to the file system without explicit user approval via the CodeLens diff UI.
+
+* **Local Vector DB**: LanceDB runs strictly on the host machine.
+
+
+* **Explicit Approvals**: The agent cannot write to the file system without explicit user approval via the CodeLens diff UI.

@@ -34,7 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 const chai_1 = require("chai");
-const ASTProvider_1 = require("../src/ast/ASTProvider");
+const ASTProvider_1 = require("../ast/ASTProvider");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 // Fake parser library to avoid loading real WASM in unit tests
