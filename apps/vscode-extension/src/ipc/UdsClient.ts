@@ -253,6 +253,20 @@ export class UdsClient extends EventEmitter {
                 return reject(new Error("Client is not connected to the orchestrator."));
             }
 
+            // Proactively inject the active file path into the user's goal
+            // Fixed the problem with agent failing to invoke the get_active_file_content
+            if (method === 'execute_agent_task' && params.goal) {
+                let activeEditor = vscode.window.activeTextEditor;
+                if (!activeEditor && vscode.window.visibleTextEditors.length > 0) {
+                    activeEditor = vscode.window.visibleTextEditors.find(e => e.document.uri.scheme === 'file');
+                }
+                
+                if (activeEditor) {
+                    const filePath = activeEditor.document.uri.fsPath;
+                    params.goal = `${params.goal}\n\n[System Context: The user's active file is currently ${filePath}]`;
+                }
+            }
+
             this.messageId++;
             const id = this.messageId;
             
