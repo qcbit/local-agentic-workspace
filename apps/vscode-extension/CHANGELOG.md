@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.2.0...v0.2.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **backend:** Pass in active text editor file. ([57a8578](https://github.com/qcbit/local-agentic-workspace/commit/57a8578ee70bb10647282ee81f5160e108a62572))
+* **backend:** Pass in active text editor file. ([5fc6323](https://github.com/qcbit/local-agentic-workspace/commit/5fc6323320769c10182fd5e71e2d569bbb2df39f))
+
 ## [0.2.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.1.13...v0.2.0) (2026-08-28)
 
 
