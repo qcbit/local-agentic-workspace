@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.2.1...v0.2.2) (2026-08-29)
+
+
+### Bug Fixes
+
+* **UX:** List available models in settings and tests for regression. ([da85304](https://github.com/qcbit/local-agentic-workspace/commit/da85304513a0481b33fb588d877cfc5ee009fabe))
+
 ## [0.2.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.2.0...v0.2.1) (2026-08-29)
 
 
