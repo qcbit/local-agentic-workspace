@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { ASTProvider } from '../src/ast/ASTProvider';
+import { ASTProvider } from '../ast/ASTProvider';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -52,7 +52,7 @@ describe('ASTProvider (unit)', () => {
     it('parses a simple document and extracts declarations', async () => {
         // Create a minimal extensionUri object with `fsPath` used by ASTProvider
         const extensionUri: any = { fsPath: '/tmp' };
-        const provider = new ASTProvider(extensionUri as any, FakeParserLib as any);
+        const provider = new ASTProvider(extensionUri as any);
 
         // Ensure a fake WASM file exists so ASTProvider.loadLanguage's fs check passes
         const wasmDir = path.join(extensionUri.fsPath, 'wasm');

@@ -1,0 +1,10 @@
+{
+  "qwen2.5-coder:14b-instruct-q4_K_M": { "recommendedMax": 24000 },
+  "qwen2.5-coder:14b": { "recommendedMax": 24000 },
+  "qwen2.5-coder:7b": { "recommendedMax": 24000 },
+  "llama3:8b": { "recommendedMax": 6000 },
+  "llama3": { "recommendedMax": 6000 },
+  "mistral:7b": { "recommendedMax": 6000 },
+  "mistral": { "recommendedMax": 6000 },
+  "deepseek-coder-v2": { "recommendedMax": 24000 }
+}

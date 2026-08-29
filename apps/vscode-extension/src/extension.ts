@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as http from 'http';
+import * as modelSpecs from './modelSpecs.json';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -291,7 +292,8 @@ export function activate(context: vscode.ExtensionContext) {
                 const availableModels = await fetchModels();
                 panel.webview.postMessage({ 
                     command: 'loadModels', 
-                    models: availableModels 
+                    models: availableModels,
+                    specs: modelSpecs
                 });
                 // 2. Fetch the true configuration from the Python orchestrator
                 try {
@@ -316,6 +318,29 @@ export function activate(context: vscode.ExtensionContext) {
                     vscode.window.showInformationMessage('Settings successfully synced to Orchestrator!');
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Failed to sync settings: ${error.message}`);
+                }
+            } else if (message.command === 'scanModelsFromPath') {
+                try {
+                    // Expand the tilde for macOS/Linux users
+                    let targetPath = message.path;
+                    if (targetPath.startsWith('~')) {
+                        targetPath = path.join(os.homedir(), targetPath.slice(1));
+                    }
+                    
+                    if (fs.existsSync(targetPath)) {
+                        // Read directory, filter out hidden files like .DS_Store
+                        const files = fs.readdirSync(targetPath).filter(f => !f.startsWith('.'));
+                        
+                        panel.webview.postMessage({ 
+                            command: 'loadModels', 
+                            models: files 
+                        });
+                        vscode.window.showInformationMessage(`Found ${files.length} models in directory.`);
+                    } else {
+                        vscode.window.showWarningMessage('The specified models path does not exist.');
+                    }
+                } catch (error: any) {
+                    vscode.window.showErrorMessage(`Failed to scan models directory: ${error.message}`);
                 }
             } 
         });
@@ -354,7 +379,7 @@ export function activate(context: vscode.ExtensionContext) {
 
                 const outputContext = cleanOutput 
                     ? `Terminal Output:\n${cleanOutput}` 
-                    : `The terminal output was not captured. You must execute this command yourself using 'terminal_proxy' to observe the error before fixing it.`;
+                    : `The terminal output was not captured. You MUST execute the exact command \`${commandLine}\` yourself using the 'terminal_proxy' tool to observe the error output before you can diagnose it.`;
 
                 // 🎯 A clean, natural sentence for the Chat UI
                 const displayPrompt = `Diagnose terminal error: \`${commandLine}\``;

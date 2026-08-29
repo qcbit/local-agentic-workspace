@@ -7,7 +7,19 @@ PACKAGE_JSON = apps/vscode-extension/package.json
 # Dynamically extract version using node -p
 VERSION := $(shell node -p "require('./$(PACKAGE_JSON)').version")
 
-.PHONY: setup dev clean clean-full lint test build-backend package
+.PHONY: setup dev clean clean-full lint test build-backend package test
+
+test: test-python test-node
+
+test-python:
+	@echo "Running Python Backend Tests..."
+	@cd services/orchestrator && pytest --asyncio-mode=auto
+
+test-node:
+	@echo "Running React UI Tests..."
+	@cd apps/vscode-extension && npm run test:webview
+	@echo "Running VS Code Extension Tests..."
+	@cd apps/vscode-extension && npm run test
 
 setup:
 	@echo "Setting up local development environment..."
@@ -30,11 +42,19 @@ test:
 clean:
 	@echo "Cleaning up standard build files..."
 	@rm -rf /tmp/*.sock *.sock
+	@echo "Cleaning VS Code extension test artifacts and build output..."
 	@rm -rf apps/vscode-extension/out apps/vscode-extension/dist
 	@rm -rf apps/warp-cli/target
 	@rm -f apps/vscode-extension/*.vsix
+	@rm -rf apps/vscode-extension/.vscode-test
 	@find . -type d -name "__pycache__" -exec rm -rf {} +
 	@find . -type f -name "*.pyc" -delete
+	@find . -type d -name ".pytest_cache" -exec rm -rf {} +
+	@find . -type d -name ".coverage" -exec rm -rf {} +
+	@rm -rf apps/vscode-extension/out
+	@echo "Cleaning Jest and npm caches..."
+	@cd apps/vscode-extension && npx jest --clearCache 2>/dev/null || true
+	@echo "Cleanup complete."
 
 clean-full: clean
 	@echo "Performing full cleanup (including binaries)..."
