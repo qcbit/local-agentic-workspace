@@ -288,30 +288,21 @@ export function activate(context: vscode.ExtensionContext) {
 
         panel.webview.onDidReceiveMessage(async (message) => {
             if (message.command === 'ready') {
-                // 1. When React tells us it's mounted, fetch and send the models
                 const availableModels = await fetchModels();
-                panel.webview.postMessage({ 
-                    command: 'loadModels', 
-                    models: availableModels,
-                    specs: modelSpecs
-                });
-                // 2. Fetch the true configuration from the Python orchestrator
+                let configData = null;
                 try {
-                    const configData = await udsClient.request('get_config', {});
-                    panel.webview.postMessage({
-                        command: 'loadConfig',
-                        config: configData
-                    });
+                    configData = await udsClient.request('get_config', {});
                 } catch (error: any) {
                     console.error('Failed to fetch config from backend:', error);
-                    vscode.window.showErrorMessage(`Could not load current settings: ${error.message}`);
-
-                    // 🛡️ FAILSAFE: Tell React to stop loading and fall back to defaults
-                    panel.webview.postMessage({
-                        command: 'loadConfig',
-                        config: null 
-                    });
                 }
+
+                // 🎯 Send everything in a unified initialization payload to prevent hanging
+                panel.webview.postMessage({ 
+                    command: 'loadInitialData', 
+                    models: availableModels,
+                    specs: modelSpecs,
+                    config: configData
+                });
             } else if (message.command === 'updateSetting') {
                 try {
                     await udsClient.request('update_config', message.config);
@@ -342,7 +333,33 @@ export function activate(context: vscode.ExtensionContext) {
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Failed to scan models directory: ${error.message}`);
                 }
-            } 
+            } else if (message.command === 'createProfile') {
+                try {
+                    await udsClient.request('create_profile', {
+                        profile_name: message.profileName,
+                        profile_data: message.profileData
+                    });
+                    vscode.window.showInformationMessage(`Profile '${message.profileName}' created successfully!`);
+                    
+                    // Small delay to ensure disk write consistency before refreshing
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    const freshConfig = await udsClient.request('get_config', {});
+                    panel.webview.postMessage({ command: 'loadConfig', config: freshConfig });
+                } catch (error: any) {
+                    vscode.window.showErrorMessage(`Failed to create profile: ${error.message}`);
+                }
+            } else if (message.command === 'deleteProfile') {
+                try {
+                    await udsClient.request('delete_profile', { profile_name: message.profileName });
+                    vscode.window.showInformationMessage(`Profile '${message.profileName}' deleted.`);
+                    
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    const freshConfig = await udsClient.request('get_config', {});
+                    panel.webview.postMessage({ command: 'loadConfig', config: freshConfig });
+                } catch (error: any) {
+                    vscode.window.showErrorMessage(`Failed to delete profile: ${error.message}`);
+                }
+            }
         });
     });
     context.subscriptions.push(disposableSettings);
