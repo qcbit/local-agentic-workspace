@@ -691,10 +691,23 @@ class Agent:
 
             # Hard-code the Circuit Breaker to sever the loop
             obs_str = str(observation).lower()
-            if any(keyword in obs_str for keyword in ["blocked", "forbidden", "denied", "outside authorized workspace"]):
+            
+            # 🎯 FIX: Use startswith() so the agent doesn't trip on its own 
+            # source code when running git diff or cat commands.
+            is_violation = (
+                obs_str.startswith("error: command blocked by sandbox") or
+                obs_str.startswith("security violation:")
+            )
+            
+            if is_violation:
                 log("🛑 [System] Sandbox violation detected. Forcing agent termination.")
                 self.state.is_complete = True
-                self.state.summary = f"Task aborted by system sandbox constraints:\n{observation}"
+                
+                # Provide a clean, user-friendly summary instead of dumping raw output
+                clean_error_msg = "Task aborted by system sandbox constraints. The requested action was blocked for security reasons."
+                self.state.summary = clean_error_msg
+                
+                # Append the clean message to the history
                 self.state.history.append(Message(role=Role.TOOL, content=self.state.summary, name="finish_task"))
                 break
 
