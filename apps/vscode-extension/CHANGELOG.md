@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.2.2...v0.3.0) (2026-08-30)
+
+
+### Features
+
+* **memory:** plan and resolve loop functionality ([ec5ce91](https://github.com/qcbit/local-agentic-workspace/commit/ec5ce91f050aef18bbaddaf0db9de0a3b4f90fb9))
+* **memory:** plan and resolve loop functionality ([28a9568](https://github.com/qcbit/local-agentic-workspace/commit/28a9568dbee05e61c798202ce988fa5739b3524d))
+
 ## [0.2.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.2.1...v0.2.2) (2026-08-29)
 
 
