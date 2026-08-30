@@ -369,6 +369,12 @@ class JsonRpcUdsServer:
                 try:
                     result_state = await self._run_agent_async(goal, auto_approve=is_auto_approve)
                     
+                    if not result_state.is_complete and not result_state.is_canceled:
+                        return self._success_response(req_id, {
+                            "status": "paused_max_iterations",
+                            "iterations": result_state.iterations
+                        })
+
                     # Extract final observation
                     final_observation = "Task failed or max iterations reached."
                     if result_state.is_complete and result_state.history:
@@ -386,6 +392,40 @@ class JsonRpcUdsServer:
                     logger.error(f"Agent execution failed: {e}")
                     return self._error_response(req_id, -32000, f"Agent execution error: {str(e)}")
                     
+            elif method == "resume_agent_task":
+                mode = params.get("mode", "continue")
+                is_auto_approve = params.get("auto_approve", False)
+                
+                if not self.persistent_agent:
+                    return self._error_response(req_id, -32000, "No active agent session to resume.")
+                
+                if mode == "unhinged":
+                    self.persistent_agent.state.max_iterations = 999999
+                    logger.info("⚠️ Agent is now UNHINGED. Infinite loop limit removed.")
+                else:
+                    self.persistent_agent.state.iterations = 0
+                    logger.info("🔄 Agent iterations reset. Resuming task.")
+                
+                # Resume without passing a new goal so it picks up where it left off
+                result_state = await self._run_agent_async(None, auto_approve=is_auto_approve)
+                
+                if not result_state.is_complete and not result_state.is_canceled:
+                    return self._success_response(req_id, {
+                        "status": "paused_max_iterations",
+                        "iterations": result_state.iterations
+                    })
+                    
+                # Extract final observation as normal
+                final_observation = "Task failed or max iterations reached."
+                if result_state.history and result_state.history[-1].name == "finish_task":
+                    final_observation = result_state.history[-1].content
+                    
+                return self._success_response(req_id, {
+                    "status": "completed", 
+                    "iterations": result_state.iterations,
+                    "final_observation": final_observation
+                })
+
             elif method == "update_config":
                 res = self.handle_update_config(params)
                 if "error" in res:
