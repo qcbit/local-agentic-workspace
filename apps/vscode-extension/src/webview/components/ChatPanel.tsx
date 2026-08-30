@@ -25,6 +25,7 @@ export const ChatPanel: React.FC = () => {
     const [input, setInput] = useState<string>(previousState.input);
     const [isAutoApprove, setIsAutoApprove] = useState<boolean>(previousState.isAutoApprove);
     const [isLoading, setIsLoading] = useState<boolean>(false);
+    const [isPaused, setIsPaused] = useState<boolean>(false);
     const [currentThought, setCurrentThought] = useState<string>("");
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [sessions, setSessions] = useState<ChatSession[]>(previousState.sessions || []);
@@ -55,9 +56,17 @@ export const ChatPanel: React.FC = () => {
                 setIsReflecting(true);
                 setReflectionText(message.text);
             }
+            else if (message.command === 'agentPaused') {
+                setIsPaused(true);
+                setIsLoading(false);
+                setCurrentThought("");
+                setIsReflecting(false);
+                setMessages(prev => [...prev, { role: 'error', content: '⚠️ Max iterations reached. The agent paused to prevent an infinite loop.' }]);
+            }
             else if (message.command === 'injectMessage') {
                 setMessages(prev => [...prev, { role: 'user', content: message.text }]);
                 setIsLoading(true);
+                setIsPaused(false);
                 setCurrentThought("Initializing...");
                 setIsReflecting(false);
             }
@@ -76,6 +85,7 @@ export const ChatPanel: React.FC = () => {
             else if (message.type === 'agent_stopped') {
                 setMessages(prev => [...prev, { role: 'error', content: 'Agent task was manually canceled.' }]);
                 setIsLoading(false);
+                setIsPaused(false);
                 setCurrentThought("");
                 setIsReflecting(false);
             }
@@ -98,6 +108,7 @@ export const ChatPanel: React.FC = () => {
         setMessages([]);
         setCurrentSessionId(Date.now().toString());
         setIsHistoryOpen(false);
+        setIsPaused(false);
         vscode.postMessage({ type: 'reset_session' });
     };
 
@@ -106,6 +117,7 @@ export const ChatPanel: React.FC = () => {
         setMessages(session.messages);
         setCurrentSessionId(session.id);
         setIsHistoryOpen(false);
+        setIsPaused(false);
         vscode.postMessage({ type: 'restore_session', messages: session.messages });
     };
 
@@ -114,6 +126,7 @@ export const ChatPanel: React.FC = () => {
         
         setMessages(prev => [...prev, { role: 'user', content: input }]);
         setIsLoading(true);
+        setIsPaused(false);
         setCurrentThought("Initializing..."); 
         setIsReflecting(false);
         
@@ -149,6 +162,7 @@ export const ChatPanel: React.FC = () => {
     const handleStopAgent = () => {
         vscode.postMessage({ type: 'stop_agent' });
         setIsLoading(false);
+        setIsPaused(false);
         setCurrentThought("");
         setIsReflecting(false);
         setMessages(prev => [...prev, { role: 'error', content: '🛑 Agent task forcefully aborted.' }]);
@@ -186,7 +200,7 @@ export const ChatPanel: React.FC = () => {
                     </div>
                 </div>
             )}
-            
+
             <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', paddingBottom: '10px' }}>
                 {messages.length === 0 && (
                     <div style={{ opacity: 0.5, textAlign: 'center', marginTop: '2rem' }}>
@@ -242,6 +256,24 @@ export const ChatPanel: React.FC = () => {
                     </div>
                 )}
             </div>
+
+            {isPaused && (
+                <div style={{ display: 'flex', gap: '10px', padding: '10px', backgroundColor: 'var(--vscode-editor-inactiveSelectionBackground)', borderRadius: '4px' }}>
+                    <button onClick={() => {
+                        setIsPaused(false);
+                        setIsLoading(true);
+                        vscode.postMessage({ command: 'resume_task', mode: 'continue', autoApprove: isAutoApprove });
+                    }}>🔄 Continue (+25 steps)</button>
+                    
+                    <button onClick={() => {
+                        setIsPaused(false);
+                        setIsLoading(true);
+                        vscode.postMessage({ command: 'resume_task', mode: 'unhinged', autoApprove: isAutoApprove });
+                    }} style={{ backgroundColor: '#d97706', color: 'white', border: 'none' }}>🔥 Unhinge (Infinite)</button>
+                    
+                    <button onClick={() => setIsPaused(false)}>🛑 Abort</button>
+                </div>
+            )}
             
             <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', borderTop: '1px solid var(--vscode-widget-border)', alignItems: 'flex-end' }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-foreground)', fontSize: '12px', cursor: 'pointer', paddingBottom: '8px' }}>

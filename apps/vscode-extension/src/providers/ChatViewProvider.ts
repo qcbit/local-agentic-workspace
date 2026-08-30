@@ -82,11 +82,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'restore_session':
                     this._udsClient.request('restore_session', { history: data.messages });
                     break;
+                case 'resume_task':
+                    await this._resumeTask(data.mode, data.autoApprove ?? false);
+                    break;
             }
         });
     }
 
-    /**
+/**
      * Executes an agent task via the IPC socket and returns the result to the UI.
      */
     private async _executeTask(goal: string, autoApprove: boolean = false) {
@@ -99,14 +102,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             };
             const result = await this._udsClient.request('execute_agent_task', payload);
 
-            let responseText = "Task completed.";
-            if (result && result.final_observation) {
-                responseText = result.final_observation;
-            } else if (result) {
-                responseText = JSON.stringify(result, null, 2);
+            if (result && result.status === 'paused_max_iterations') {
+                this._view.webview.postMessage({ command: 'agentPaused' });
+            } else {
+                let responseText = result?.final_observation || JSON.stringify(result, null, 2);
+                this._view.webview.postMessage({ command: 'agentResponse', text: responseText });
             }
+        } catch (error: any) {
+            this._view.webview.postMessage({ 
+                command: 'agentError', 
+                text: error.message || 'Error communicating with orchestrator.' 
+            });
+        }
+    }
 
-            this._view.webview.postMessage({ command: 'agentResponse', text: responseText });
+    /**
+     * Resumes an agent task via the IPC socket and returns the result to the UI.
+     */
+    private async _resumeTask(mode: string, autoApprove: boolean = false) {
+        if (!this._view) return;
+
+        try {
+            const payload = {
+                mode: mode,
+                auto_approve: autoApprove
+            };
+            const result = await this._udsClient.request('resume_agent_task', payload);
+
+            if (result && result.status === 'paused_max_iterations') {
+                this._view.webview.postMessage({ command: 'agentPaused' });
+            } else {
+                let responseText = result?.final_observation || JSON.stringify(result, null, 2);
+                this._view.webview.postMessage({ command: 'agentResponse', text: responseText });
+            }
         } catch (error: any) {
             this._view.webview.postMessage({ 
                 command: 'agentError', 

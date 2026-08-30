@@ -139,7 +139,7 @@ class AgentState:
     is_complete: bool = False
     is_canceled: bool = False
     iterations: int = 0
-    max_iterations: int = 10
+    max_iterations: int = 25
     summary: str = ""  # to track the running summary 
     run_id: str = "" # Unique execution token
 
@@ -485,7 +485,7 @@ class Agent:
             permission_callback=permission_callback
         )      
         self.tool_registry = ToolRegistry(uds_server=uds_server)
-        self.max_iterations = 10
+        self.max_iterations = config.get("max_iterations", 25)
         
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
@@ -544,19 +544,21 @@ class Agent:
             else:
                 logger.info(msg)
 
-        # 🎯 Reset iteration counters for the new turn, but KEEP the history
-        self.state.user_goal = user_goal
-        self.state.is_complete = False
-        self.state.is_canceled = False
-        self.state.iterations = 0
-        self.state.summary = ""
-        self.state.run_id = str(uuid.uuid4())
+        # Only reset the run state if a NEW goal is provided
+        if user_goal:
+            self.state.user_goal = user_goal
+            self.state.is_complete = False
+            self.state.is_canceled = False
+            self.state.iterations = 0
+            self.state.max_iterations = self.max_iterations  # Ensure state uses configured limit
+            self.state.summary = ""
+            self.state.run_id = str(uuid.uuid4())
+            self.state.history.append(Message(role=Role.USER, content=user_goal))
+            logger.info(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
+        else:
+            logger.info("[bold cyan]▶️ --- Resuming Agent Loop ---[/bold cyan]")
+
         my_run_id = self.state.run_id
-
-        # 🎯 Append the new prompt as a USER message to the history
-        self.state.history.append(Message(role=Role.USER, content=user_goal))
-
-        log(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
 
         while not self.state.is_complete and not self.state.is_canceled and self.state.iterations < self.state.max_iterations:
             log(f"\n[dim]🔄 --- Iteration {self.state.iterations + 1} ---[/dim]")
@@ -577,6 +579,13 @@ class Agent:
 
             AVAILABLE CONTEXT TOOLS:
             {tool_descriptions}
+
+            STRICT DIRECTIVES FOR TOOL SELECTION:
+            - TOOL HIERARCHY: NEVER use 'terminal_proxy' (e.g., 'ls', 'cat', 'grep', 'find', 'dir') to search, read, or inspect files.
+            - DIRECTORY LISTINGS & FILE READS: Use 'file_system' with action 'read'. Passing a directory path returns a directory listing without needing bash.
+            - CODE SEARCH: Always use 'search_codebase' instead of shell 'grep' or 'find'[cite: 3].
+            - TERMINAL_PROXY USE CASE: Use 'terminal_proxy' ONLY for running tests (pytest, npm test), compiling builds, or running project executables[cite: 3].
+            - BATCHING: Once you have the information needed, immediately proceed to write files or call 'finish_task' without redundant verification steps[cite: 3].
 
             Your output must be a single JSON object with EXACTLY these keys: "reasoning" (string), "tool" (string), and "tool_args" (dictionary). 
             
