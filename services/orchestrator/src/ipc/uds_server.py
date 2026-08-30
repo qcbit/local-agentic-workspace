@@ -99,11 +99,11 @@ def load_config():
         except Exception as e:
             logger.warning(f"Error reading global config: {e}")
             
-    # 3. Default configuration if neither exists
+    # Default configuration with a flexible 'profiles' dictionary
     default_config = {
-        "active_profile": "home",
+        "active_profile": "Default",
         "profiles": {
-            "home": {
+            "Default": {
                 "llm": {
                     "model_name": "llama3",
                     "endpoint_url": "http://127.0.0.1:11434/v1/chat/completions"
@@ -422,6 +422,30 @@ class JsonRpcUdsServer:
                 self.persistent_agent.state.history = restored_history
                 logger.info(f"⏪ Restored {len(restored_history)} messages to agent memory.")
                 return self._success_response(req_id, {"status": "restored"})
+
+            elif method == "create_profile":
+                profile_name = params.get("profile_name")
+                profile_data = params.get("profile_data", {})
+                if not profile_name:
+                    return self._error_response(req_id, -32602, "Profile name is required")
+                
+                if "profiles" not in self.config:
+                    self.config["profiles"] = {}
+                
+                self.config["profiles"][profile_name] = profile_data
+                save_config(self.config)
+                return self._success_response(req_id, {"status": "success", "profiles": self.config["profiles"]})
+
+            elif method == "delete_profile":
+                profile_name = params.get("profile_name")
+                if profile_name == "Default" or profile_name == self.config.get("active_profile"):
+                    return self._error_response(req_id, -32600, "Cannot delete the default or currently active profile.")
+                
+                if profile_name in self.config.get("profiles", {}):
+                    del self.config["profiles"][profile_name]
+                    save_config(self.config)
+                    return self._success_response(req_id, {"status": "success", "profiles": self.config["profiles"]})
+                return self._error_response(req_id, -40404, "Profile not found")
             else:
                 return self._error_response(req_id, -32601, f"Method '{method}' not found")
                 

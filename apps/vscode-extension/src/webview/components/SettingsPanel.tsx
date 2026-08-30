@@ -9,12 +9,16 @@ const DEFAULT_OLLAMA_PATH = '~/.ollama/models/manifests/registry.ollama.ai/libra
 
 export const SettingsPanel: React.FC = () => {
     const [isLoading, setIsLoading] = useState(true);
-    const [rawConfig, setRawConfig] = useState<any>(null);
     
     // Profile & LLM Settings
-    const [activeProfile, setActiveProfile] = useState('home');
+    const [config, setConfig] = useState<any>(null);
+    const [activeProfile, setActiveProfile] = useState<string>('Default');
+    const [profiles, setProfiles] = useState<Record<string, any>>({});
+    const [newProfileName, setNewProfileName] = useState<string>('');
     const [endpointUrl, setEndpointUrl] = useState('');
     const [apiKey, setApiKey] = useState('');
+
+    // Models & Memory
     const [modelName, setModelName] = useState(''); 
     const [modelsPath, setModelsPath] = useState(DEFAULT_OLLAMA_PATH);
     const [tokenLimit, setTokenLimit] = useState(6000);
@@ -22,8 +26,8 @@ export const SettingsPanel: React.FC = () => {
     const [modelSpecs, setModelSpecs] = useState<Record<string, { recommendedMax: number }>>({});
 
     // Helper to populate form fields from a specific profile object
-    const applyProfileState = (profileName: string, config: any) => {
-        const profile = config?.profiles?.[profileName];
+    const applyProfileState = (profileName: string, targetConfig: any) => {
+        const profile = targetConfig?.profiles?.[profileName];
         if (profile) {
             setEndpointUrl(profile.llm?.endpoint_url || profile.llm?.endpoint || '');
             setApiKey(profile.llm?.api_key || profile.llm?.apiKey || '');
@@ -31,53 +35,68 @@ export const SettingsPanel: React.FC = () => {
             setModelsPath(profile.llm?.models_path || DEFAULT_OLLAMA_PATH);
             setTokenLimit(profile.memory?.max_tokens || 6000);
         } else {
-            if (profileName === 'work') {
-                setEndpointUrl('https://your-enterprise-endpoint.azure.com/v1/chat/completions');
-                setApiKey('');
-                setModelName('gpt-4-turbo');
-                setModelsPath('');
-                setTokenLimit(8000);
-            } else {
-                setEndpointUrl('http://127.0.0.1:11434/v1/chat/completions');
-                setApiKey('none');
-                setModelName('llama3:8b');
-                setModelsPath(DEFAULT_OLLAMA_PATH);
-                setTokenLimit(6000);
-            }
+            setEndpointUrl('http://127.0.0.1:11434/v1/chat/completions');
+            setApiKey('none');
+            setModelName('llama3:8b');
+            setModelsPath(DEFAULT_OLLAMA_PATH);
+            setTokenLimit(6000);
         }
     };
 
     useEffect(() => {
-        vscode.postMessage({ command: 'ready' });
-
-        const handleMessage = (event: MessageEvent) => {
+        const handler = (event: MessageEvent) => {
             const message = event.data;
             
+            // 🎯 Handle unified initial data payload or individual config loads
+            if ((message.command === 'loadConfig' || message.command === 'loadInitialData') && message.config) {
+                const cfg = message.config;
+                setConfig(cfg);
+                const active = cfg.active_profile || 'Default';
+                setActiveProfile(active);
+                setProfiles(cfg.profiles || {});
+                
+                applyProfileState(active, cfg);
+                setIsLoading(false); // 🔓 UNLOCKS THE PANEL
+            }
+
             if (message.command === 'loadModels') {
-                setAvailableModels(message.models || []);
+                if (message.models) setAvailableModels(message.models);
                 if (message.specs) setModelSpecs(message.specs);
-            } 
-            else if (message.command === 'loadConfig') {
-                const config = message.config;
-                if (config) {
-                    setRawConfig(config);
-                    const currentProfile = config.active_profile || 'home';
-                    setActiveProfile(currentProfile);
-                    applyProfileState(currentProfile, config);
-                }
-                setIsLoading(false);
             }
         };
 
-        window.addEventListener('message', handleMessage);
-        return () => window.removeEventListener('message', handleMessage);
+        window.addEventListener('message', handler);
+        vscode.postMessage({ command: 'ready' });
+        
+        return () => window.removeEventListener('message', handler);
     }, []);
 
-    const handleProfileChange = (newProfile: string) => {
-        setActiveProfile(newProfile);
-        if (rawConfig) {
-            applyProfileState(newProfile, rawConfig);
-        }
+    const handleProfileChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        const selected = e.target.value;
+        setActiveProfile(selected);
+        applyProfileState(selected, { profiles });
+    };
+
+    const handleCreateProfile = () => {
+        if (!newProfileName.trim() || profiles[newProfileName]) return;
+        const defaultProfileData = {
+            llm: { endpoint_url: "http://127.0.0.1:11434/v1/chat/completions", model_name: "llama3", api_key: "" },
+            memory: { max_tokens: 6000 }
+        };
+        vscode.postMessage({
+            command: 'createProfile',
+            profileName: newProfileName.trim(),
+            profileData: defaultProfileData
+        });
+        setNewProfileName('');
+    };
+
+    const handleDeleteProfile = (name: string) => {
+        if (Object.keys(profiles).length <= 1) return; 
+        vscode.postMessage({
+            command: 'deleteProfile',
+            profileName: name
+        });
     };
 
     const handleModelChange = (val: string) => {
@@ -132,14 +151,31 @@ export const SettingsPanel: React.FC = () => {
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', padding: '1rem' }}>
-            <h2>Workspace Environment</h2>
+            <h2>Agentic Workspace Settings</h2>
             
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-                <label>Active Profile</label>
-                <select value={activeProfile} onChange={(e) => handleProfileChange(e.target.value)} style={inputStyle}>
-                    <option value="home">🏠 Home (Local Ollama)</option>
-                    <option value="work">🏢 Work (Azure Foundry / Cloud)</option>
+            <div style={{ marginBottom: '15px' }}>
+                <label><strong>Active Profile: </strong></label>
+                <select value={activeProfile} onChange={handleProfileChange} style={{ padding: '5px', marginLeft: '10px' }}>
+                    {Object.keys(profiles).map(p => (
+                        <option key={p} value={p}>{p}</option>
+                    ))}
                 </select>
+                {activeProfile !== 'Default' && (
+                    <button onClick={() => handleDeleteProfile(activeProfile)} style={{ marginLeft: '10px', background: '#d32f2f', color: 'white', border: 'none', padding: '5px 10px', cursor: 'pointer' }}>
+                        Delete Profile
+                    </button>
+                )}
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+                <input 
+                    type="text" 
+                    placeholder="New profile name..." 
+                    value={newProfileName} 
+                    onChange={e => setNewProfileName(e.target.value)}
+                    style={{ padding: '5px' }}
+                />
+                <button onClick={handleCreateProfile}>Add Profile</button>
             </div>
 
             <hr style={{ width: '100%', borderColor: 'var(--vscode-widget-border)' }} />
@@ -156,7 +192,6 @@ export const SettingsPanel: React.FC = () => {
                 <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={inputStyle} />
             </div>
 
-            {/* NEW: Models Directory Path */}
             <div style={{ display: 'flex', flexDirection: 'column' }}>
                 <label>Local Models Path (For Dropdown)</label>
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
