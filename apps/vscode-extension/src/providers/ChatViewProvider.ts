@@ -53,6 +53,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             }
         });
 
+        // Listen for the agent to forward the new reflecting state to the webview
+        this._udsClient.on('agentReflecting', (message: string) => {
+            if (this._view) {
+                this._view.webview.postMessage({
+                    command: 'agentReflecting',
+                    text: message
+                });
+            }
+        });
+
         // Listen for user actions from the React webview
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.command || data.type) {
