@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.4.0...v0.5.0) (2026-08-30)
+
+
+### Features
+
+* **UX:** Unhinged mode ([859a464](https://github.com/qcbit/local-agentic-workspace/commit/859a4646aa138bb9f6f360e750ce490d4bc68516))
+* **UX:** Unhinged mode ([075e60d](https://github.com/qcbit/local-agentic-workspace/commit/075e60d9c38961ca8caf0b0be5e3bc12cc77bf8b))
+
 ## [0.4.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.3.0...v0.4.0) (2026-08-30)
 
 
