@@ -598,7 +598,35 @@ class Agent:
             - IF the user ONLY asks a question (e.g., "what is the active file?", "explain this code"), you must ignore all bugs and ONLY answer the question using the `finish_task` tool.
             - WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file. 
             """
+
+            # 1. Determine if a critique is required
+            needs_reflection = False
             
+            # Condition A: Mandatory Checkpoint (Every 3 iterations)
+            if self.state.iterations > 0 and self.state.iterations % 3 == 0:
+                needs_reflection = True
+                
+            # Condition B: Mid-Stream Correction (Check if the last tool failed)
+            elif self.state.history and self.state.history[-1].role == Role.TOOL:
+                last_obs = self.state.history[-1].content.lower()
+                if "error" in last_obs or ("exit code" in last_obs and "exit code 0" not in last_obs):
+                    needs_reflection = True
+
+            # 2. Push the UI state BEFORE the LLM starts generating
+            if self.uds_server:
+                status_type = "reflecting" if needs_reflection else "thinking"
+                status_msg = "Critique Required: Evaluating recent actions..." if needs_reflection else "🧠 Analyzing context and planning next step..."
+                
+                await self.uds_server.send_notification(
+                    "agent_status", 
+                    {"status": status_type, "message": status_msg}
+                )
+
+            # 3. Inject the mandatory critique directive into the system prompt
+            if needs_reflection:
+                system_prompt += "\n\nCRITIQUE REQUIRED: Review your last observations. Did your last action succeed? State your revised approach before calling the next tool."
+
+            # 4. Build context and execute reasoning
             context = self.memory.build_safe_context(self.state, system_prompt)
             llm_response = await self.reason(context)
 
@@ -612,13 +640,6 @@ class Agent:
                 log("🛑 [Agent] Task was manually cancelled by the user.")
                 break
 
-            if self.uds_server:
-                reasoning_text = llm_response.get("reasoning", "...")
-                await self.uds_server.send_notification(
-                    "agent_status", 
-                    {"message": f"🧠 Thinking: {reasoning_text}"}
-                )
-            
             self.state.history.append(Message(role=Role.ASSISTANT, content=json.dumps(llm_response)))
 
             tool_name = llm_response.get("tool", "unknown")

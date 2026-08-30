@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 
 declare const acquireVsCodeApi: any;
 
-// Safely acquire the API only if it hasn't been acquired yet
 const vscode = (window as any).vscodeApi || ((window as any).vscodeApi = acquireVsCodeApi());
 
 type ChatSession = {
@@ -12,7 +11,6 @@ type ChatSession = {
     timestamp: number;
 };
 
-// Update previousState extraction
 const previousState = vscode.getState() || { 
     sessions: [],
     currentSessionId: Date.now().toString(),
@@ -23,19 +21,19 @@ const previousState = vscode.getState() || {
 };
 
 export const ChatPanel: React.FC = () => {
-    // 2. Initialize your React state using the saved values
     const [messages, setMessages] = useState<{ role: string, content: string }[]>(previousState.messages);
     const [input, setInput] = useState<string>(previousState.input);
     const [isAutoApprove, setIsAutoApprove] = useState<boolean>(previousState.isAutoApprove);
-    const [isLoading, setIsLoading] = useState<boolean>(false); // Always start unlocked, ignoring previousState.isLoading
+    const [isLoading, setIsLoading] = useState<boolean>(false);
     const [currentThought, setCurrentThought] = useState<string>("");
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [sessions, setSessions] = useState<ChatSession[]>(previousState.sessions || []);
     const [currentSessionId, setCurrentSessionId] = useState<string>(previousState.currentSessionId || Date.now().toString());
     const [isHistoryOpen, setIsHistoryOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
+    const [isReflecting, setIsReflecting] = useState(false);
+    const [reflectionText, setReflectionText] = useState("");
 
-    // 3. Save to VS Code's internal state manager whenever these values change
     useEffect(() => {
         vscode.setState({
             messages,
@@ -51,28 +49,35 @@ export const ChatPanel: React.FC = () => {
             if (message.command === 'agentThinking') {
                 setMessages(prev => [...prev, { role: 'thought', content: message.text }]);
                 setCurrentThought(message.text);
+                setIsReflecting(false);
             } 
-            // Intercept proactive terminal errors and render them as user prompts
+            else if (message.command === 'agentReflecting') {
+                setIsReflecting(true);
+                setReflectionText(message.text);
+            }
             else if (message.command === 'injectMessage') {
                 setMessages(prev => [...prev, { role: 'user', content: message.text }]);
                 setIsLoading(true);
                 setCurrentThought("Initializing...");
+                setIsReflecting(false);
             }
             else if (message.command === 'agentResponse') {
                 setMessages(prev => [...prev, { role: 'agent', content: message.text }]);
                 setIsLoading(false);
                 setCurrentThought(""); 
+                setIsReflecting(false);
             } 
             else if (message.command === 'agentError') {
                 setMessages(prev => [...prev, { role: 'error', content: message.text }]);
                 setIsLoading(false);
                 setCurrentThought(""); 
+                setIsReflecting(false);
             }
-            // 🛑 Reset UI if the agent was forcefully stopped
             else if (message.type === 'agent_stopped') {
                 setMessages(prev => [...prev, { role: 'error', content: 'Agent task was manually canceled.' }]);
                 setIsLoading(false);
                 setCurrentThought("");
+                setIsReflecting(false);
             }
         };
         window.addEventListener('message', handler);
@@ -101,15 +106,16 @@ export const ChatPanel: React.FC = () => {
         setMessages(session.messages);
         setCurrentSessionId(session.id);
         setIsHistoryOpen(false);
-        // Send history to Python to rebuild AgentState
         vscode.postMessage({ type: 'restore_session', messages: session.messages });
     };
+
     const handleSend = () => {
         if (!input.trim() || isLoading) return;
         
         setMessages(prev => [...prev, { role: 'user', content: input }]);
         setIsLoading(true);
         setCurrentThought("Initializing..."); 
+        setIsReflecting(false);
         
         vscode.postMessage({
             command: 'executeTask',
@@ -140,15 +146,11 @@ export const ChatPanel: React.FC = () => {
         }
     };
 
-    // 🎯 The function that fires the stop signal to the extension host
     const handleStopAgent = () => {
-        // 1. Fire the signal to the backend
-        vscode.postMessage({
-            type: 'stop_agent'
-        });
-        // 2. INSTANTLY forcefully unlock the UI (Break the deadlock!)
+        vscode.postMessage({ type: 'stop_agent' });
         setIsLoading(false);
         setCurrentThought("");
+        setIsReflecting(false);
         setMessages(prev => [...prev, { role: 'error', content: '🛑 Agent task forcefully aborted.' }]);
     };
 
@@ -184,6 +186,7 @@ export const ChatPanel: React.FC = () => {
                     </div>
                 </div>
             )}
+            
             <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', paddingBottom: '10px' }}>
                 {messages.length === 0 && (
                     <div style={{ opacity: 0.5, textAlign: 'center', marginTop: '2rem' }}>
@@ -192,7 +195,6 @@ export const ChatPanel: React.FC = () => {
                 )}
                 {messages.map((msg, i) => (
                     msg.role === 'thought' ? (
-                        // 🎯 Distinct styling for intermediate reasoning steps
                         <div key={i} style={{
                             alignSelf: 'flex-start', 
                             opacity: 0.7, 
@@ -205,7 +207,6 @@ export const ChatPanel: React.FC = () => {
                             {msg.content}
                         </div>
                     ) : (
-                        // Standard styling for user, agent, and error messages
                         <div key={i} style={{
                             padding: '8px 12px', 
                             borderRadius: '6px',
@@ -221,9 +222,23 @@ export const ChatPanel: React.FC = () => {
                     )
                 ))}
                 
-                {isLoading && (
+                {isLoading && !isReflecting && (
                     <div style={{ alignSelf: 'flex-start', opacity: 0.7, fontStyle: 'italic', padding: '8px 12px' }}>
                         <span className="spinner">⚙️</span> {currentThought || "Thinking..."}
+                    </div>
+                )}
+
+                {isReflecting && (
+                    <div style={{ 
+                        alignSelf: 'flex-start', 
+                        borderLeft: '3px solid #d97706', 
+                        padding: '8px 12px', 
+                        opacity: 0.9,
+                        backgroundColor: 'rgba(217, 119, 6, 0.1)',
+                        borderRadius: '0 4px 4px 0',
+                        fontSize: '0.9em'
+                    }}>
+                        🔍 <i>{reflectionText || "Agent is evaluating the roadmap..."}</i>
                     </div>
                 )}
             </div>
@@ -241,7 +256,6 @@ export const ChatPanel: React.FC = () => {
             </div>
                 
             <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', alignItems: 'flex-end' }}>
-                {/* Multiline input */}
                 <textarea 
                     ref={textareaRef}
                     value={input}
@@ -265,7 +279,6 @@ export const ChatPanel: React.FC = () => {
                     }}
                 />
                 
-                {/* 🎯 Toggle between Send and Stop based on isLoading */}
                 {isLoading ? (
                     <button 
                         onClick={handleStopAgent}

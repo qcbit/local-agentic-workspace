@@ -62,8 +62,14 @@ export class UdsClient extends EventEmitter {
                 
                 if (msg.method && msg.id === undefined) {
                     if (msg.method === "agent_status") {
-                        // Broadcast the agent's thought to the rest of the extension
-                        this.emit('agentThinking', msg.params?.message);
+                        const statusType = msg.params?.status || 'thinking';
+        
+                        if (statusType === 'reflecting') {
+                            this.emit('agentReflecting', msg.params?.message);
+                        } else {
+                            // Default backward compatibility for existing 'thinking' state
+                            this.emit('agentThinking', msg.params?.message);
+                        }
                     }
                     continue; // Skip the reverse-request logic
                 }
