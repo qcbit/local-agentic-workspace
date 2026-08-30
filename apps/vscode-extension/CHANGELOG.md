@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.3.0...v0.4.0) (2026-08-30)
+
+
+### Features
+
+* **UX:** Multiple profiles ([f4fae70](https://github.com/qcbit/local-agentic-workspace/commit/f4fae70471ba2bc9afb33840d84101970f5e7fe6))
+* **UX:** Multiple profiles ([1f01cfa](https://github.com/qcbit/local-agentic-workspace/commit/1f01cfa83769b127996c39cc6e1c256107473d0c))
+
 ## [0.3.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.2.2...v0.3.0) (2026-08-30)
 
 
