@@ -319,14 +319,30 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                     
                     if (fs.existsSync(targetPath)) {
-                        // Read directory, filter out hidden files like .DS_Store
-                        const files = fs.readdirSync(targetPath).filter(f => !f.startsWith('.'));
+                        // Read Ollama manifest directory structure
+                        // Structure is: <targetPath>/<model>/<tag>
+                        const models: string[] = [];
+                        const modelDirs = fs.readdirSync(targetPath, { withFileTypes: true });
+                        
+                        for (const dirent of modelDirs) {
+                            if (dirent.isDirectory() && !dirent.name.startsWith('.')) {
+                                const modelName = dirent.name;
+                                const tagsPath = path.join(targetPath, modelName);
+                                const tagFiles = fs.readdirSync(tagsPath, { withFileTypes: true });
+                                
+                                for (const tagDirent of tagFiles) {
+                                    if (tagDirent.isFile() && !tagDirent.name.startsWith('.')) {
+                                        models.push(`${modelName}:${tagDirent.name}`);
+                                    }
+                                }
+                            }
+                        }
                         
                         panel.webview.postMessage({ 
                             command: 'loadModels', 
-                            models: files 
+                            models: models 
                         });
-                        vscode.window.showInformationMessage(`Found ${files.length} models in directory.`);
+                        vscode.window.showInformationMessage(`Found ${models.length} models in directory.`);
                     } else {
                         vscode.window.showWarningMessage('The specified models path does not exist.');
                     }
