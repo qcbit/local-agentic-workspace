@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.5.1...v0.5.2) (2026-08-31)
+
+
+### Bug Fixes
+
+* **settings:** Model deployment names list ([090d24d](https://github.com/qcbit/local-agentic-workspace/commit/090d24d516821cc78a80b408687956fbe908a578))
+* **settings:** Model deployment names list ([175b861](https://github.com/qcbit/local-agentic-workspace/commit/175b861b946fe51aaa1931082d48ca76e3bc15ad))
+
 ## [0.5.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.5.0...v0.5.1) (2026-08-30)
 
 
