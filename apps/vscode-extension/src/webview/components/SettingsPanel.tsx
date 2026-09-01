@@ -25,6 +25,10 @@ export const SettingsPanel: React.FC = () => {
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [modelSpecs, setModelSpecs] = useState<Record<string, { recommendedMax: number }>>({});
 
+    // Sandbox Security
+    const [strictMode, setStrictMode] = useState(true);
+    const [allowedExternalPaths, setAllowedExternalPaths] = useState('');
+
     // Helper to populate form fields from a specific profile object
     const applyProfileState = (profileName: string, targetConfig: any) => {
         const profile = targetConfig?.profiles?.[profileName];
@@ -34,12 +38,16 @@ export const SettingsPanel: React.FC = () => {
             setModelName(profile.llm?.model_name || profile.llm?.model || '');
             setModelsPath(profile.llm?.models_path || DEFAULT_OLLAMA_PATH);
             setTokenLimit(profile.memory?.max_tokens || 6000);
+            setStrictMode(profile.sandbox?.strict_mode ?? true);
+            setAllowedExternalPaths((profile.sandbox?.allowed_external_paths || []).join('\n'));
         } else {
             setEndpointUrl('http://127.0.0.1:11434/v1/chat/completions');
             setApiKey('none');
             setModelName('llama3:8b');
             setModelsPath(DEFAULT_OLLAMA_PATH);
             setTokenLimit(6000);
+            setStrictMode(true);
+            setAllowedExternalPaths('');
         }
     };
 
@@ -125,6 +133,10 @@ export const SettingsPanel: React.FC = () => {
                     },
                     memory: { 
                         max_tokens: tokenLimit 
+                    },
+                    sandbox: {
+                        strict_mode: strictMode,
+                        allowed_external_paths: allowedExternalPaths.split('\n').map(p => p.trim()).filter(p => p !== '')
                     }
                 }
             }
@@ -236,6 +248,31 @@ export const SettingsPanel: React.FC = () => {
                         <option key={preset} value={preset} />
                     ))}
                 </datalist>
+            </div>
+
+            <hr style={{ width: '100%', borderColor: 'var(--vscode-widget-border)' }} />
+            
+            <h3>Sandbox Security</h3>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                <input 
+                    type="checkbox" 
+                    checked={strictMode}
+                    onChange={(e) => setStrictMode(e.target.checked)}
+                />
+                <label>Enable Strict Mode (Enforce Workspace Boundaries)</label>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <label>Allowed External Paths (One per line)</label>
+                <textarea 
+                    rows={4}
+                    value={allowedExternalPaths}
+                    onChange={(e) => setAllowedExternalPaths(e.target.value)}
+                    disabled={!strictMode}
+                    placeholder="~/.ollama/models&#10;/Users/shared/libraries"
+                    style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
+                />
             </div>
 
             <button onClick={handleSync} style={{ padding: '0.6rem 1rem', cursor: 'pointer', marginTop: '0.5rem', backgroundColor: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', fontWeight: 'bold' }}>
