@@ -91,28 +91,24 @@ def load_config():
         except Exception as e:
             logger.warning(f"Error reading local config: {e}")
             
-    # 2. Try User-Defined Global Config
-    if os.path.exists(global_config_path):
-        try:
-            with open(global_config_path, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"Error reading global config: {e}")
-            
     # Default configuration with a flexible 'profiles' dictionary
     default_config = {
         "active_profile": "Default",
         "profiles": {
             "Default": {
                 "llm": {
-                    "model_name": "llama3",
+                    "model_name": "llama3:8b",
                     "endpoint_url": "http://127.0.0.1:11434/v1/chat/completions"
+                },
+                "memory": {
+                    "max_tokens": 6000
                 }
             }
         }
     }
     
-    save_config(default_config, force_global=True)
+    save_config(default_config, force_global=False)
+    logger.info(f"⚙️ Auto-created missing workspace config at: {local_config_path}")
     return default_config
 
 def save_config(new_config, force_global=False):
@@ -288,64 +284,46 @@ class JsonRpcUdsServer:
             return {"content": "Error: VS Code client timed out."}
 
     def handle_update_config(self, payload: dict):
-        # 1. Use the global config_path instead of the hardcoded project_root path
-        logger.info(f"⚙️ Target config path: {config_path}")
-
-        # 2. Load the existing config
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config_data = json.load(f)
-        except FileNotFoundError:
-            logger.error(f"❌ Failed to locate config file at: {config_path}")
-            # If it's missing we'll initialize an empty config to merge into
-            config_data = {}
-        except Exception as e:
-            logger.error(f"❌ Error reading config.json: {e}")
-            return {"error": str(e)}
-
-        # 3. Extract incoming payload data
         active_profile = payload.get("active_profile")
         profile_settings = payload.get("profile_settings", {})
 
-        if active_profile:
-            config_data["active_profile"] = active_profile
-            
-            # 4. Safely DEEP MERGE new settings into the active profile
-            if "profiles" in config_data and active_profile in config_data["profiles"]:
-                config_data["profiles"][active_profile] = deep_update(
-                    config_data["profiles"][active_profile], 
-                    profile_settings
-                )
-            else:
-                if "profiles" not in config_data:
-                    config_data["profiles"] = {}
-                config_data["profiles"][active_profile] = profile_settings
+        if not active_profile:
+            return {"error": "active_profile is required"}
 
-        # 5. Write updated config back to disk
-        try:
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(config_data, f, indent=4)
-        except Exception as e:
-            logger.error(f"❌ Failed to write config.json: {e}")
-            return {"error": f"Failed to save file: {e}"}
+        # 1. Update the active profile pointer in memory
+        self.config["active_profile"] = active_profile
 
-        # 6. Update in-memory reference
-        self.config = config_data
+        # 2. Ensure the profiles dictionary exists
+        if "profiles" not in self.config:
+            self.config["profiles"] = {}
 
-        # 🎯 Nuke the persistent agent so the memory resets and the new model loads
+        # 3. Ensure the specific profile entry exists before merging
+        if active_profile not in self.config["profiles"]:
+            self.config["profiles"][active_profile] = {}
+
+        # 4. Safely deep merge the incoming settings from the UI
+        if profile_settings:
+            self.config["profiles"][active_profile] = deep_update(
+                self.config["profiles"][active_profile], 
+                profile_settings
+            )
+
+        # 5. Save the unified state to disk using the standard helper
+        save_config(self.config)
+
+        # 6. Reset the persistent agent to force it to load the new profile
         self.persistent_agent = None
 
-        logger.info(f"✅ Config successfully updated on disk and in memory for profile: '{active_profile}'")
-        return {"status": "success", "message": "Configuration merged and saved."}
+        logger.info(f"✅ Config successfully updated and saved for profile: '{active_profile}'")
+        
+        # 7. CRITICAL: Return the full config so the React frontend can update its state
+        return {"status": "success", "config": self.config}
 
     async def process_request(self, payload: str) -> Dict[str, Any]:
         """Validates and routes the JSON-RPC 2.0 payload."""
         req = {}
         try:
             req = json.loads(payload)
-            
-            if req.get("jsonrpc") != "2.0" or "id" not in req or "method" not in req:
-                return self._error_response(None, -32600, "Invalid Request")
             
             method = req["method"]
             params = req.get("params", {})
