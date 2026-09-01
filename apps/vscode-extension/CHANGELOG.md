@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.5.3...v0.6.0) (2026-09-01)
+
+
+### Features
+
+* **UX:** Sandbox ([f09cb67](https://github.com/qcbit/local-agentic-workspace/commit/f09cb67f0e1b3057e26e896ff5442a37d95d3cb9))
+* **UX:** Sandbox ([31b4b22](https://github.com/qcbit/local-agentic-workspace/commit/31b4b227bd73147f17d95311e84fa60b0b068d0b))
+
 ## [0.5.3](https://github.com/qcbit/local-agentic-workspace/compare/v0.5.2...v0.5.3) (2026-09-01)
 
 
