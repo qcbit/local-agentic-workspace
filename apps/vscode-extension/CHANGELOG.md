@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.3](https://github.com/qcbit/local-agentic-workspace/compare/v0.5.2...v0.5.3) (2026-09-01)
+
+
+### Bug Fixes
+
+* **UX:** Profile fails to load ([d2c8265](https://github.com/qcbit/local-agentic-workspace/commit/d2c82655448d916f4dd511d7516728f32124f1ec))
+* **UX:** Profile fails to load ([cdca8bf](https://github.com/qcbit/local-agentic-workspace/commit/cdca8bf832da125334c114f68c0d30a4a4b97f8b))
+
 ## [0.5.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.5.1...v0.5.2) (2026-08-31)
 
 
