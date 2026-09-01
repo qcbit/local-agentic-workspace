@@ -296,6 +296,15 @@ export function activate(context: vscode.ExtensionContext) {
                     console.error('Failed to fetch config from backend:', error);
                 }
 
+                if (configData && configData.profiles) {
+                    Object.values(configData.profiles).forEach((profile: any) => {
+                        const savedModel = profile?.llm?.model_name || profile?.llm?.model;
+                        if (savedModel && !availableModels.includes(savedModel)) {
+                            availableModels.push(savedModel);
+                        }
+                    });
+                }
+
                 // 🎯 Send everything in a unified initialization payload to prevent hanging
                 panel.webview.postMessage({ 
                     command: 'loadInitialData', 
@@ -312,42 +321,44 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             } else if (message.command === 'scanModelsFromPath') {
                 try {
-                    // Expand the tilde for macOS/Linux users
-                    let targetPath = message.path;
-                    if (targetPath.startsWith('~')) {
-                        targetPath = path.join(os.homedir(), targetPath.slice(1));
-                    }
+                    // Extract path safely, handling different potential message structures
+                    let targetPath = message.path || (message.data && message.data.path) || message.models_path;
                     
-                    if (fs.existsSync(targetPath)) {
-                        // Read Ollama manifest directory structure
-                        // Structure is: <targetPath>/<model>/<tag>
-                        const models: string[] = [];
-                        const modelDirs = fs.readdirSync(targetPath, { withFileTypes: true });
-                        
-                        for (const dirent of modelDirs) {
-                            if (dirent.isDirectory() && !dirent.name.startsWith('.')) {
-                                const modelName = dirent.name;
-                                const tagsPath = path.join(targetPath, modelName);
-                                const tagFiles = fs.readdirSync(tagsPath, { withFileTypes: true });
-                                
-                                for (const tagDirent of tagFiles) {
-                                    if (tagDirent.isFile() && !tagDirent.name.startsWith('.')) {
-                                        models.push(`${modelName}:${tagDirent.name}`);
-                                    }
+                    if (!targetPath) {
+                        throw new Error("No path provided to scan.");
+                    }
+
+                    // Manually expand the tilde to the user's home directory
+                    if (targetPath.startsWith('~')) {
+                        // Remove the '~/' so path.join works cleanly without double slashes
+                        const cleanPath = targetPath.startsWith('~/') ? targetPath.slice(2) : targetPath.slice(1);
+                        targetPath = path.join(os.homedir(), cleanPath);
+                    }
+
+                    const models: string[] = [];
+                    const families = fs.readdirSync(targetPath, { withFileTypes: true });
+                    
+                    for (const family of families) {
+                        if (family.isDirectory() && !family.name.startsWith('.')) {
+                            const familyPath = path.join(targetPath, family.name);
+                            const tags = fs.readdirSync(familyPath, { withFileTypes: true });
+                            
+                            for (const tag of tags) {
+                                if (tag.isFile() && !tag.name.startsWith('.')) {
+                                    // Concatenates the folder name and file name into the canonical Ollama tag
+                                    models.push(`${family.name}:${tag.name}`);
                                 }
                             }
                         }
-                        
-                        panel.webview.postMessage({ 
-                            command: 'loadModels', 
-                            models: models 
-                        });
-                        vscode.window.showInformationMessage(`Found ${models.length} models in directory.`);
-                    } else {
-                        vscode.window.showWarningMessage('The specified models path does not exist.');
                     }
+                    
+                    // Send the fully-qualified deployment names back to the React UI
+                    panel.webview.postMessage({ command: 'loadModels', models: models });
                 } catch (error: any) {
-                    vscode.window.showErrorMessage(`Failed to scan models directory: ${error.message}`);
+                    panel.webview.postMessage({ 
+                        command: 'agentError', 
+                        text: `Failed to scan directory: ${error.message}` 
+                    });
                 }
             } else if (message.command === 'createProfile') {
                 try {
