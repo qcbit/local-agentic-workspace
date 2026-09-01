@@ -160,11 +160,20 @@ def is_path_safe(workspace_root: str, target_path: str) -> bool:
 class ToolDispatcher:
     """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
     
-    def __init__(self, uds_server=None, workspace_root: Optional[str] = None, permission_callback=None):
+    def __init__(
+        self,
+        uds_server=None,
+        workspace_root: Optional[str] = None,
+        permission_callback=None,
+        sandbox_config: Optional[Dict[str, Any]] = None,
+        max_file_read_chars: int = 4000,
+    ):
         self.uds_server = uds_server
         # Default to current directory if not provided
-        self.workspace_root = workspace_root or os.getcwd() 
-        self.permission_callback = permission_callback # Store the UI callback
+        self.workspace_root = workspace_root or os.getcwd()
+        self.permission_callback = permission_callback  # Store the UI callback
+        self.sandbox_config = sandbox_config or {}
+        self.max_file_read_chars = max_file_read_chars
         # Strict deny-list for highly destructive or interactive commands
         self.shell_deny_list = [
             "rm", "sudo", "mkfs", "fdisk", "dd", "chown", "chmod", 
@@ -193,9 +202,27 @@ class ToolDispatcher:
         action = args.get("action")
         path = args.get("path", ".")
         
-        # 🛡️ SANDBOX ENFORCEMENT 
-        if not is_path_safe(self.workspace_root, path):
-            return f"Error: Access denied. Path '{path}' is outside the authorized workspace sandbox."
+        # 🛡️ 🎯 NEW DYNAMIC SANDBOX ENFORCEMENT
+        is_authorized = False
+        if not self.sandbox_config.get("strict_mode", True):
+            is_authorized = True
+        else:
+            abs_target = os.path.abspath(os.path.expanduser(path))
+            abs_workspace = os.path.abspath(self.workspace_root)
+            
+            # Check primary workspace
+            if abs_target.startswith(abs_workspace):
+                is_authorized = True
+            else:
+                # Check authorized external paths
+                for allowed_dir in self.sandbox_config.get("allowed_external_paths", []):
+                    abs_allowed = os.path.abspath(os.path.expanduser(allowed_dir))
+                    if abs_target.startswith(abs_allowed):
+                        is_authorized = True
+                        break
+
+        if not is_authorized:
+            return f"error: command blocked by sandbox. Path '{path}' is outside authorized workspace root and not in allowed_external_paths."
 
         # TIER 1: Read-only actions (Auto-Approve)
         if action == "read":
@@ -206,11 +233,10 @@ class ToolDispatcher:
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
                 # --- Protect the Context Window ---
-                max_chars = 4000 
-                if len(content) > max_chars:
+                if len(content) > self.max_file_read_chars:
                     return (
                         f"File content of '{path}' (TRUNCATED - File is too large):\n"
-                        f"{content[:max_chars]}\n\n"
+                        f"{content[:self.max_file_read_chars]}\n\n"
                         f"...[TRUNCATED]... The file is too large to read entirely. "
                         f"You MUST use the 'search_codebase' tool to query specific parts of this file."
                     )    
@@ -239,7 +265,6 @@ class ToolDispatcher:
                 "content": content
             })
             
-            # -> NEW: Explicitly check if the UI timed out
             if "content" in response and "timed out" in response["content"]:
                 return response["content"]
             
@@ -477,18 +502,23 @@ class Agent:
         self.llm_provider = llm_provider
         self.uds_server = uds_server
         self.workspace_root = workspace_root or os.getcwd()
+        self.sandbox_config = config.get("sandbox", {})
+        
+        llm_config = config.get("llm", {})
+        memory_config = config.get("memory", {})
+        max_tokens = memory_config.get("max_tokens", 6000)
+        dynamic_char_limit = int(max_tokens * 3.5 * 0.8)
         
         # Pass the workspace_root down to the dispatcher
         self.dispatcher = ToolDispatcher(
             uds_server=uds_server, 
             workspace_root=self.workspace_root,
-            permission_callback=permission_callback
+            permission_callback=permission_callback,
+            sandbox_config=self.sandbox_config,
+            max_file_read_chars=dynamic_char_limit
         )      
         self.tool_registry = ToolRegistry(uds_server=uds_server)
         self.max_iterations = config.get("max_iterations", 25)
-        
-        llm_config = config.get("llm", {})
-        memory_config = config.get("memory", {})
         
         self.memory = SlidingContextManager(
             memory_config=memory_config,
@@ -725,6 +755,30 @@ class Agent:
             
         return self.state
 
+    def is_path_authorized(self, target_path: str) -> bool:
+        """Validates if a target path is within the workspace or explicitly authorized."""
+        sandbox_config = self.sandbox_config
+        
+        # 1. Global sandbox bypass
+        if not sandbox_config.get("strict_mode", True):
+            return True
+
+        # Resolve the absolute path to prevent directory traversal (e.g., '../../etc/passwd')
+        abs_target = os.path.abspath(os.path.expanduser(target_path))
+        abs_workspace = os.path.abspath(self.workspace_root)
+
+        # 2. Check primary workspace root
+        if abs_target.startswith(abs_workspace):
+            return True
+
+        # 3. Check authorized external paths
+        allowed_paths = sandbox_config.get("allowed_external_paths", [])
+        for allowed_dir in allowed_paths:
+            abs_allowed = os.path.abspath(os.path.expanduser(allowed_dir))
+            if abs_target.startswith(abs_allowed):
+                return True
+
+        return False
 # --- Agent Core ---
 
 class UniversalLLMProvider:
