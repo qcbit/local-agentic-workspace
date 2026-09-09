@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.6.1...v0.6.2) (2026-09-09)
+
+
+### Bug Fixes
+
+* **UX:** Bind dynamic TCP ports. ([746557b](https://github.com/qcbit/local-agentic-workspace/commit/746557ba84613fed24cdd421d67e4c9eb5c5a555))
+* **UX:** Bind dynamic TCP ports. ([6e20e6c](https://github.com/qcbit/local-agentic-workspace/commit/6e20e6ca6b217e13112bd5a6dfd64b733b0ab4c0))
+
 ## [0.6.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.6.0...v0.6.1) (2026-09-09)
 
 
