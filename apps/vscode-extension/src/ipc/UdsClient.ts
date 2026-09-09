@@ -14,8 +14,9 @@ export class UdsClient extends EventEmitter {
     private port: number = 7777;
     private host: string = '127.0.0.1';
 
-    constructor() {
+    constructor(port: number = 7777) {
         super();
+        this.port = port;
     }
 
     /**

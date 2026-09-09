@@ -124,6 +124,12 @@ export class WarpProxyServer {
     public start() {
         this.server = this.app.listen(this.port, '127.0.0.1', () => {
             console.log(`Local Agentic Proxy running on http://127.0.0.1:${this.port}`);
+        }).on('error', (e: any) => {
+            if (e.code === 'EADDRINUSE') {
+                console.log(`Port ${this.port} is already in use. Proxy likely running in another window.`);
+            } else {
+                console.error(`Proxy server error:`, e);
+            }
         });
     }
 
