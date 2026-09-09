@@ -98,7 +98,8 @@ def load_config():
             "Default": {
                 "llm": {
                     "model_name": "llama3:8b",
-                    "endpoint_url": "http://127.0.0.1:11434/v1/chat/completions"
+                    "endpoint_url": "http://127.0.0.1:11434/v1/chat/completions",
+                    "chars_per_token": 4.0
                 },
                 "memory": {
                     "max_tokens": 6000

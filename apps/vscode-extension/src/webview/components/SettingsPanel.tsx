@@ -22,8 +22,11 @@ export const SettingsPanel: React.FC = () => {
     const [modelName, setModelName] = useState(''); 
     const [modelsPath, setModelsPath] = useState(DEFAULT_OLLAMA_PATH);
     const [tokenLimit, setTokenLimit] = useState(6000);
-    const [availableModels, setAvailableModels] = useState<string[]>([]);
-    const [modelSpecs, setModelSpecs] = useState<Record<string, { recommendedMax: number }>>({});
+    const [availableModels, setAvailableModels] = useState<string[]>();
+    const [modelSpecs, setModelSpecs] = useState<Record<string, { recommendedMax: number }>>();
+
+    // Token Heuristics (new feature)
+    const [charsPerToken, setCharsPerToken] = useState<number>(4.0);
 
     // Sandbox Security
     const [strictMode, setStrictMode] = useState(true);
@@ -38,14 +41,18 @@ export const SettingsPanel: React.FC = () => {
             setModelName(profile.llm?.model_name || profile.llm?.model || '');
             setModelsPath(profile.llm?.models_path || DEFAULT_OLLAMA_PATH);
             setTokenLimit(profile.memory?.max_tokens || 6000);
+            
+            setCharsPerToken(profile.llm?.chars_per_token ?? 4.0);
+            
             setStrictMode(profile.sandbox?.strict_mode ?? true);
             setAllowedExternalPaths((profile.sandbox?.allowed_external_paths || []).join('\n'));
         } else {
             setEndpointUrl('http://127.0.0.1:11434/v1/chat/completions');
-            setApiKey('none');
+            setApiKey('');
             setModelName('llama3:8b');
             setModelsPath(DEFAULT_OLLAMA_PATH);
             setTokenLimit(6000);
+            setCharsPerToken(4.0);
             setStrictMode(true);
             setAllowedExternalPaths('');
         }
@@ -88,7 +95,7 @@ export const SettingsPanel: React.FC = () => {
     const handleCreateProfile = () => {
         if (!newProfileName.trim() || profiles[newProfileName]) return;
         const defaultProfileData = {
-            llm: { endpoint_url: "http://127.0.0.1:11434/v1/chat/completions", model_name: "llama3", api_key: "" },
+            llm: { endpoint_url: "http://127.0.0.1:11434/v1/chat/completions", model_name: "llama3", api_key: "", chars_per_token: 4.0 },
             memory: { max_tokens: 6000 }
         };
         vscode.postMessage({
@@ -109,9 +116,11 @@ export const SettingsPanel: React.FC = () => {
 
     const handleModelChange = (val: string) => {
         setModelName(val);
-        const matchedKey = Object.keys(modelSpecs).find(key => val.includes(key));
-        if (matchedKey && modelSpecs[matchedKey]?.recommendedMax) {
-            setTokenLimit(modelSpecs[matchedKey].recommendedMax);
+        if (modelSpecs && val) {
+            const matchedKey = Object.keys(modelSpecs).find(key => val.includes(key));
+            if (matchedKey && modelSpecs[matchedKey]?.recommendedMax) {
+                setTokenLimit(modelSpecs[matchedKey].recommendedMax);
+            }
         }
     };
 
@@ -129,10 +138,11 @@ export const SettingsPanel: React.FC = () => {
                         endpoint_url: endpointUrl,
                         api_key: apiKey,
                         model_name: modelName,
-                        models_path: modelsPath 
+                        models_path: modelsPath,
+                        chars_per_token: charsPerToken
                     },
                     memory: { 
-                        max_tokens: tokenLimit 
+                        max_tokens: tokenLimit
                     },
                     sandbox: {
                         strict_mode: strictMode,
@@ -234,7 +244,7 @@ export const SettingsPanel: React.FC = () => {
                 <label>Model Deployment Name</label>
                 <input type="text" list="available-models-list" value={modelName} onChange={(e) => handleModelChange(e.target.value)} style={inputStyle} />
                 <datalist id="available-models-list">
-                    {availableModels.map(model => (
+                    {availableModels?.map(model => (
                         <option key={model} value={model} />
                     ))}
                 </datalist>
@@ -248,6 +258,40 @@ export const SettingsPanel: React.FC = () => {
                         <option key={preset} value={preset} />
                     ))}
                 </datalist>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                    <label>Characters per Token</label>
+                    <span 
+                        title="Rule of thumb: 1 token ≈ 4 characters for English text. For exact model ratios, use official Tokenizer Web Tools or calculate programmatically using tiktoken/transformers."
+                        style={{
+                            cursor: 'help',
+                            borderRadius: '50%',
+                            background: 'var(--vscode-badge-background)',
+                            color: 'var(--vscode-badge-foreground)',
+                            width: '16px',
+                            height: '16px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '11px',
+                            fontWeight: 'bold'
+                        }}
+                    >
+                        ?
+                    </span>
+                </div>
+                <input 
+                    type="number"
+                    step="0.1"
+                    value={charsPerToken}
+                    onChange={(e) => setCharsPerToken(parseFloat(e.target.value))}
+                    style={inputStyle}
+                />
+                <small style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                    Multiplier used to estimate context limits for this specific model.
+                </small>
             </div>
 
             <hr style={{ width: '100%', borderColor: 'var(--vscode-widget-border)' }} />
@@ -270,7 +314,7 @@ export const SettingsPanel: React.FC = () => {
                     value={allowedExternalPaths}
                     onChange={(e) => setAllowedExternalPaths(e.target.value)}
                     disabled={!strictMode}
-                    placeholder="~/.ollama/models&#10;/Users/shared/libraries"
+                    placeholder={"~/.ollama/models\n/Users/shared/libraries"}
                     style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
                 />
             </div>

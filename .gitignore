@@ -9,6 +9,7 @@ node_modules/
 out/
 dist/
 *.vsix
+**/bin
 
 # Python Orchestrator
 __pycache__/
@@ -20,6 +21,9 @@ __pycache__/
 *.lancedb
 /data/vector_index/
 .ollama/
+.agentic_config.json
+build
+*.pcap
 
 # Rust / Warp CLI
 target/
