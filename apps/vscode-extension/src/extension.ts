@@ -12,13 +12,26 @@ import { spawn, ChildProcess } from 'child_process';
 import { UdsClient } from './ipc/UdsClient';
 import { WarpProxyServer } from './proxy/WarpProxyServer';
 
+import * as net from 'net';
+
+async function getFreePort(): Promise<number> {
+    return new Promise((resolve, reject) => {
+        const srv = net.createServer();
+        srv.listen(0, '127.0.0.1', () => {
+            const port = (srv.address() as net.AddressInfo).port;
+            srv.close(() => resolve(port));
+        });
+        srv.on('error', reject);
+    });
+}
+
 let udsClient: UdsClient;
 let proxyServer: WarpProxyServer;
 let statusBarItem: vscode.StatusBarItem;
 let backendProcess: ChildProcess | undefined;
 const codeLensProvider = new AgentApprovalCodeLensProvider();
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     // 1. Move the workspace definition to the very top so it can be used immediately
     const workspaceFolders = vscode.workspace.workspaceFolders;
     const activeWorkspace = workspaceFolders ? workspaceFolders[0].uri.fsPath : os.homedir();
@@ -63,6 +76,13 @@ export function activate(context: vscode.ExtensionContext) {
     // 🎯 Pass the global config path if the user defined one
     if (globalConfigPath && globalConfigPath.trim() !== '') {
         args.push('--global-config', globalConfigPath.trim());
+    }
+
+    let orchestratorPort = 7777;
+    const isDev = context.extensionMode === vscode.ExtensionMode.Development;
+    if (!isDev) {
+        orchestratorPort = await getFreePort();
+        args.push("--port", orchestratorPort.toString());
     }
 
     const backendChannel = vscode.window.createOutputChannel('Local Agentic Backend');
@@ -115,7 +135,7 @@ export function activate(context: vscode.ExtensionContext) {
     console.log('Local Agentic Workspace extension is now active.');
 
     // NOW that the process is booting up, connect the IPC client
-    udsClient = new UdsClient();
+    udsClient = new UdsClient(orchestratorPort);
     
     // (You will want a slight delay or retry-loop here so the binary has 
     // time to boot up and create the socket file before UdsClient connects)

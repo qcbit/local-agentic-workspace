@@ -621,7 +621,16 @@ async def handle_terminal_error(params: dict):
         logger.error(f"Failed to start proactive agent: {e}")
 
 if __name__ == "__main__":
-    server = JsonRpcUdsServer()
+    import sys
+    host = '127.0.0.1'
+    port = 7777
+    
+    if "--port" in sys.argv:
+        idx = sys.argv.index("--port")
+        if idx + 1 < len(sys.argv):
+            port = int(sys.argv[idx + 1])
+            
+    server = JsonRpcUdsServer(host=host, port=port)
     
     # Register the handler before starting the server
     server.register_notification_handler("terminal_error_detected", handle_terminal_error)
