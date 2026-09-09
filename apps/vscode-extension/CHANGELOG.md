@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.6.0...v0.6.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **UX:** Missing token heuristics in settings ([7d1edfc](https://github.com/qcbit/local-agentic-workspace/commit/7d1edfcaaaf00beda665baa6d1c9fd65c27a66e4))
+* **UX:** Missing token heuristics in settings ([4caf3e4](https://github.com/qcbit/local-agentic-workspace/commit/4caf3e46a24d7d03789175ac2e089db12d23560b))
+
 ## [0.6.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.5.3...v0.6.0) (2026-09-01)
 
 
