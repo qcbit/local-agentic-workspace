@@ -6,13 +6,20 @@ logger = logging.getLogger(__name__)
 class SlidingContextManager:
     """Manages the token window with a rolling summarization buffer."""
     
-    def __init__(self, memory_config: Dict[str, Any], model_name: str, llm_provider: Any):
+    def __init__(self, memory_config: Dict[str, Any], model_name: str, llm_provider: Any, llm_config: Dict[str, Any] = None):
         self.max_tokens = memory_config.get("max_tokens", 4000)
         self.llm_provider = llm_provider
         
-        heuristics = memory_config.get("token_heuristics", {})
-        base_model = self._normalize_model_name(model_name)
-        self.chars_per_token = heuristics.get(base_model, heuristics.get("default", 3.5))
+        if llm_config and "chars_per_token" in llm_config:
+            self.chars_per_token = float(llm_config["chars_per_token"])
+        else:
+            # Set reasonable defaults based on common models
+            if "llama3" in model_name.lower():
+                self.chars_per_token = 4.0  # Llama3 typically around 4 chars/token
+            elif "qwen" in model_name.lower():
+                self.chars_per_token = 3.0  # Qwen models typically around 3 chars/token
+            else:
+                self.chars_per_token = 3.5  # Default fallback
         
         logger.info(f"🧠 Context Manager initialized for '{model_name}' (Ratio: {self.chars_per_token} chars/token, Max: {self.max_tokens})")
 
@@ -97,7 +104,7 @@ class SlidingContextManager:
             # Persist the new summary to the state
             state.summary = new_summary
             
-            # Prune the state history so these messages aren't summarized again next turn
+            # Prune the state history so these messages aren't summarized again next time
             state.history = [msg for msg in state.history if msg not in dropped_history]
             
             # Rebuild the summary block for this current injection

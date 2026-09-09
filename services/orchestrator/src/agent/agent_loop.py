@@ -524,6 +524,7 @@ class Agent:
             memory_config=memory_config,
             model_name=llm_config.get("model_name", "llama3:8b"),
             llm_provider=self.llm_provider,
+            llm_config=llm_config
         )
 
         # 🎯 Initialize the state ONCE so history survives multiple turns
