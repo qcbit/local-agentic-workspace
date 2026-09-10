@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.6.2...v0.7.0) (2026-09-10)
+
+
+### Features
+
+* **UX:** auto-scroll, break and resume on chat panel ([182f541](https://github.com/qcbit/local-agentic-workspace/commit/182f541a78b2baa0be64f045f4ca5ea1311cc589))
+
+
+### Bug Fixes
+
+* **editor:** code lens ([8bb01f3](https://github.com/qcbit/local-agentic-workspace/commit/8bb01f38139a4180fa9f7412fc2f29bf91da17be))
+
 ## [0.6.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.6.1...v0.6.2) (2026-09-09)
 
 
