@@ -653,13 +653,10 @@ class Agent:
                     needs_reflection = True
 
             # 2. Push the UI state BEFORE the LLM starts generating
-            if self.uds_server:
-                status_type = "reflecting" if needs_reflection else "thinking"
-                status_msg = "Critique Required: Evaluating recent actions..." if needs_reflection else "🧠 Analyzing context and planning next step..."
-                
+            if self.uds_server and needs_reflection:
                 await self.uds_server.send_notification(
                     "agent_status", 
-                    {"status": status_type, "message": status_msg}
+                    {"status": "reflecting", "message": "Critique Required: Evaluating recent actions..."}
                 )
 
             # 3. Inject the mandatory critique directive into the system prompt
@@ -698,6 +695,13 @@ class Agent:
             reasoning = llm_response.get("reasoning", "No reasoning provided.")
 
             log(f"[bold magenta]🧠 [Reasoning][/bold magenta] {reasoning}")
+            
+            if self.uds_server:
+                await self.uds_server.send_notification(
+                    "agent_status", 
+                    {"status": "thinking", "message": reasoning}
+                )
+
             log(f"[bold yellow]🔧 [Dispatching][/bold yellow] {tool_name} with args: {tool_args}")
 
             if tool_name == "finish_task":
