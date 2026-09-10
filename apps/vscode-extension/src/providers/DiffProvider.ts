@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
 export class AgenticDiffProvider implements vscode.TextDocumentContentProvider {
-    public static readonly scheme = 'localAgentic-diff';
+    public static readonly scheme = 'localagentic-diff';
     
     // Emitter to notify VS Code when the virtual document content updates
     private onDidChangeEmitter = new vscode.EventEmitter<vscode.Uri>();

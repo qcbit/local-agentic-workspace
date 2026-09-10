@@ -34,6 +34,9 @@ export const ChatPanel: React.FC = () => {
     const [searchQuery, setSearchQuery] = useState("");
     const [isReflecting, setIsReflecting] = useState(false);
     const [reflectionText, setReflectionText] = useState("");
+    
+    const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
 
     useEffect(() => {
         vscode.setState({
@@ -69,6 +72,7 @@ export const ChatPanel: React.FC = () => {
                 setIsPaused(false);
                 setCurrentThought("Initializing...");
                 setIsReflecting(false);
+                setIsAutoScrollEnabled(true);
             }
             else if (message.command === 'agentResponse') {
                 setMessages(prev => [...prev, { role: 'agent', content: message.text }]);
@@ -94,6 +98,19 @@ export const ChatPanel: React.FC = () => {
         return () => window.removeEventListener('message', handler);
     }, []);
 
+    const handleScroll = () => {
+        if (!scrollContainerRef.current) return;
+        const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+        const isAtBottom = Math.abs(scrollHeight - clientHeight - scrollTop) < 10;
+        setIsAutoScrollEnabled(isAtBottom);
+    };
+
+    useEffect(() => {
+        if (isAutoScrollEnabled && scrollContainerRef.current) {
+            scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+        }
+    }, [messages, currentThought, reflectionText, isLoading, isAutoScrollEnabled]);
+
     const saveCurrentSession = () => {
         if (messages.length === 0) return;
         const title = messages.find(m => m.role === 'user')?.content.substring(0, 30) || "New Chat";
@@ -118,6 +135,7 @@ export const ChatPanel: React.FC = () => {
         setCurrentSessionId(session.id);
         setIsHistoryOpen(false);
         setIsPaused(false);
+        setIsAutoScrollEnabled(true);
         vscode.postMessage({ type: 'restore_session', messages: session.messages });
     };
 
@@ -129,6 +147,7 @@ export const ChatPanel: React.FC = () => {
         setIsPaused(false);
         setCurrentThought("Initializing..."); 
         setIsReflecting(false);
+        setIsAutoScrollEnabled(true);
         
         vscode.postMessage({
             command: 'executeTask',
@@ -201,7 +220,11 @@ export const ChatPanel: React.FC = () => {
                 </div>
             )}
 
-            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', paddingBottom: '10px' }}>
+            <div 
+                ref={scrollContainerRef}
+                onScroll={handleScroll}
+                style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', paddingBottom: '10px' }}
+            >
                 {messages.length === 0 && (
                     <div style={{ opacity: 0.5, textAlign: 'center', marginTop: '2rem' }}>
                         How can I help you today?
