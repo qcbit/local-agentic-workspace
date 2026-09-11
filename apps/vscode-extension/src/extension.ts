@@ -152,6 +152,18 @@ export async function activate(context: vscode.ExtensionContext) {
     // We store the resolver here temporarily while the diff is open waiting for the user
     let pendingWriteResolve: ((value: { status: string }) => void) | null = null;
 
+    // Add this inside the activate() function where UDS commands are registered
+    context.subscriptions.push(
+        vscode.commands.registerCommand('agenticWorkspace.storeSecret', async (key: string, value: string) => {
+            await context.secrets.store(key, value);
+            return { status: 'success' };
+        }),
+        vscode.commands.registerCommand('agenticWorkspace.getSecret', async (key: string) => {
+            const secret = await context.secrets.get(key);
+            return { value: secret || null };
+        })
+    );
+
     // 1. Register CodeLens to the EXACT scheme used by your DiffProvider
     context.subscriptions.push(
         vscode.languages.registerCodeLensProvider(
@@ -332,6 +344,17 @@ export async function activate(context: vscode.ExtensionContext) {
                     specs: modelSpecs,
                     config: configData
                 });
+
+                const tavilyKey = await context.secrets.get('tavily_api_key');
+                const braveKey = await context.secrets.get('brave_api_key');
+
+                panel.webview.postMessage({
+                    command: 'loadSecrets',
+                    secrets: {
+                        tavily: tavilyKey ? '••••••••••••••••' : '',
+                        brave: braveKey ? '••••••••••••••••' : ''
+                    }
+                });
             } else if (message.command === 'updateSetting') {
                 try {
                     await udsClient.request('update_config', message.config);
@@ -406,6 +429,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Failed to delete profile: ${error.message}`);
                 }
+            } else if (message.command === 'storeSecret') {
+                await context.secrets.store(message.key, message.value);
             }
         });
     });

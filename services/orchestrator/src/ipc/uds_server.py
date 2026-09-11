@@ -178,14 +178,9 @@ class JsonRpcUdsServer:
                 req = json.loads(payload)
 
                 # 🛡️ SANITIZE LOGS: Mask the API key before printing
-                safe_req = copy.deepcopy(req)
-                if safe_req.get("method") == "update_config":
-                    llm_settings = safe_req.get("params", {}).get("profile_settings", {}).get("llm", {})
-                    for key in ["api_key", "apiKey"]:
-                        if llm_settings.get(key) not in [None, "", "none", "entra"]:
-                            llm_settings[key] = "********"
+                safe_msg = sanitize_ipc_payload(req)
                 
-                print(f"🕵️ [RAW SOCKET] {json.dumps(safe_req)}")
+                logger.debug(f"🕵️ [RAW SOCKET] {json.dumps(safe_msg)}")
 
                 # --- Smart Client Routing ---
                 # Only designate the connection as the VS Code Extension Host if it sends editor-specific commands.
@@ -588,6 +583,40 @@ class JsonRpcUdsServer:
             await self.active_writer.drain()
         except Exception as e:
             logger.error(f"Failed to send notification: {e}")
+
+def sanitize_ipc_payload(payload: dict) -> dict:
+    """
+    Recursively scrubs the IPC payload before logging.
+    1. Redacts sensitive credentials (API keys).
+    2. Truncates massive text blocks to prevent terminal flooding.
+    """
+    safe_payload = copy.deepcopy(payload)
+
+    def _clean_node(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                k_lower = str(key).lower()
+                
+                # 1. Redact Secrets (Exact matches or known JSON-RPC return values)
+                if k_lower in ["value", "api_key", "tavily_api_key", "brave_api_key", "key"] and isinstance(value, str):
+                    if value.startswith("tvly-") or value.startswith("BSA") or len(value) > 15:
+                        node[key] = f"{value[:5]}...[REDACTED]"
+                
+                # 2. Truncate Massive Context (Files, Terminal Output, Code)
+                elif k_lower in ["content", "output", "code", "file_content"] and isinstance(value, str):
+                    if len(value) > 300:
+                        node[key] = f"{value[:300]}\n... [TRUNCATED {len(value) - 300} chars for logs] ..."
+                
+                # 3. Recurse deeper
+                else:
+                    _clean_node(value)
+                    
+        elif isinstance(node, list):
+            for item in node:
+                _clean_node(item)
+
+    _clean_node(safe_payload)
+    return safe_payload
 
 async def handle_terminal_error(params: dict):
     """Callback triggered when VS Code detects a terminal failure."""

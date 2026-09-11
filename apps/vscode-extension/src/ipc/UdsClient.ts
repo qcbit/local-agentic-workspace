@@ -101,35 +101,50 @@ export class UdsClient extends EventEmitter {
                             } 
 
                             else if (msg.method === 'vscode_command') {
-                                const command = msg.params.command;
-                                const targetPath = msg.params.target_path || msg.params.path || (msg.params.args && msg.params.args[0]); 
+                                const command = msg.params?.command;
+                                const targetPath = msg.params?.target_path || msg.params?.path || (msg.params?.args && msg.params?.args[0]); 
 
-                                if (!targetPath || typeof targetPath !== 'string' || targetPath.trim() === '') {
-                                    resultPayload = { content: `Error: No valid target path provided. Received: ${JSON.stringify(msg.params)}` };
-                                } else {
-                                    try {
-                                        const uri = vscode.Uri.file(targetPath);
-                                        // The Window Reload Trap Fix
-                                        if (command === 'vscode.openFolder') {
-                                            // 🎯 Verify the directory actually exists!
+                                try {
+                                    // 1. Handle secret retrieval directly (string argument, return value preserved)
+                                    if (command === 'agenticWorkspace.getSecret' || command === 'agenticWorkspace.storeSecret') {
+                                        const rawArg = msg.params?.target_path || msg.params?.key;
+                                        const extraArg = msg.params?.value;
+                                        const result: any = await vscode.commands.executeCommand(command, rawArg, extraArg);
+                                        resultPayload = typeof result === 'object' && result !== null ? result : { value: result };
+                                    }
+                                    // 2. The Window Reload Trap Fix
+                                    else if (command === 'vscode.openFolder') {
+                                        if (!targetPath) {
+                                            resultPayload = { content: `Error: No target path provided for ${command}.` };
+                                        } else {
+                                            const uri = vscode.Uri.file(targetPath);
                                             if (!fs.existsSync(uri.fsPath)) {
                                                 resultPayload = { content: `Error: The directory '${targetPath}' does not exist on the file system.` };
                                             } else {
                                                 setTimeout(() => {
                                                     vscode.commands.executeCommand(command, uri);
                                                 }, 1000);
-                                                
                                                 resultPayload = { content: `Command accepted. VS Code is now reloading into ${targetPath}.` };
                                             }
+                                        }
+                                    } 
+                                    // 3. File/editor commands requiring Uri
+                                    else if (command === 'vscode.open') {
+                                        if (!targetPath) {
+                                            resultPayload = { content: `Error: No target path provided for ${command}.` };
                                         } else {
-                                            // Standard file opens
+                                            const uri = vscode.Uri.file(targetPath);
                                             await vscode.commands.executeCommand(command, uri);
                                             resultPayload = { content: `Successfully executed '${command}' on '${targetPath}'.` };
                                         }
-                                        
-                                    } catch (err: any) {
-                                        resultPayload = { content: `Failed to execute VS Code command: ${err.message}` };
+                                    } 
+                                    // 4. Generic command fallback (preserves command return values)
+                                    else {
+                                        const result: any = await vscode.commands.executeCommand(command, targetPath);
+                                        resultPayload = typeof result === 'object' && result !== null ? result : { content: `Executed '${command}'`, value: result };
                                     }
+                                } catch (err: any) {
+                                    resultPayload = { content: `Failed to execute VS Code command '${command}': ${err.message}` };
                                 }
                             }
                             

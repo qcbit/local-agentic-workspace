@@ -11,3 +11,4 @@ pyperclip
 pyinstaller
 openai
 azure-identity
+aiohttp>=3.14.3
