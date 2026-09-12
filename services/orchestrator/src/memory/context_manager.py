@@ -1,12 +1,12 @@
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
 class SlidingContextManager:
     """Manages the token window with a rolling summarization buffer."""
     
-    def __init__(self, memory_config: Dict[str, Any], model_name: str, llm_provider: Any, llm_config: Dict[str, Any] = None):
+    def __init__(self, memory_config: Dict[str, Any], model_name: str, llm_provider: Any, llm_config: Optional[Dict[str, Any]] = None):
         self.max_tokens = memory_config.get("max_tokens", 4000)
         self.llm_provider = llm_provider
         
