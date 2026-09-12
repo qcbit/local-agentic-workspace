@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.7.0...v0.8.0) (2026-09-12)
+
+
+### Features
+
+* **UI:** web search tool ([0be8f80](https://github.com/qcbit/local-agentic-workspace/commit/0be8f803b49c05475c664c768d8771142fa5688e))
+* **UI:** web search tool ([4253fd1](https://github.com/qcbit/local-agentic-workspace/commit/4253fd1fadfb840eaf53baf56e10b0d8b96f0d24))
+
 ## [0.7.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.6.2...v0.7.0) (2026-09-10)
 
 
