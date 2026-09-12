@@ -339,9 +339,11 @@ class JsonRpcUdsServer:
                     logger.info("⚡ [Agent Execution] Auto-approve is enabled. Agent will execute without user confirmation.")
 
                 logger.info(f"🧠 [Agent Execution] Starting task: {goal}")
+
+                workflow_config = params.get("workflow_config", None)
                 
                 try:
-                    result_state = await self._run_agent_async(goal, auto_approve=is_auto_approve)
+                    result_state = await self._run_agent_async(goal, auto_approve=is_auto_approve, workflow_config=workflow_config)
                     
                     if not result_state.is_complete and not result_state.is_canceled:
                         return self._success_response(req_id, {
@@ -511,10 +513,10 @@ class JsonRpcUdsServer:
         # workspace_root is defined globally at the top of uds_server.py
         self.persistent_agent = Agent(llm_provider=llm, config=active_config, uds_server=self, workspace_root=workspace_root)
 
-    async def _run_agent_async(self, goal: str, auto_approve: bool = False):
+    async def _run_agent_async(self, goal: str, auto_approve: bool = False, workflow_config: Optional[Dict[str, Any]] = None):
         """Asynchronously instantiates and runs the agent."""
         self._ensure_agent()
-        state = await self.persistent_agent.run(goal, auto_approve=auto_approve)
+        state = await self.persistent_agent.run(goal, auto_approve=auto_approve, workflow_config=workflow_config)
         return state
 
     def _success_response(self, req_id: Any, result: Any) -> Dict[str, Any]:

@@ -1,0 +1,32 @@
+{
+  "id": "security_audit",
+  "name": "Local Codebase Security Audit",
+  "description": "Performs a read-only security sweep of the active workspace, checking for hardcoded secrets, injection flaws, and unsafe module imports.",
+  "orchestrator_config": {
+    "max_iterations": 20,
+    "auto_approve_tools": false,
+    "sandbox": {
+      "strict_mode": true
+    },
+    "search": {
+      "enabled": false
+    }
+  },
+  "context_engineering": {
+    "role": "You are a Principal Security Architect performing a static analysis audit on a local codebase.",
+    "task": "Identify security vulnerabilities, prioritize them by severity, and propose exact remediation steps.",
+    "constraints": [
+      "READ-ONLY MODE: You must NEVER execute the 'write' action using the file_system tool.",
+      "Do not use terminal_proxy to execute application code. You may only use it to run `grep`, `find`, or installed linters.",
+      "Rely on search_codebase to locate cryptographic implementations and environment variable ingestion."
+    ],
+    "failure_behavior": "If access to a requested directory is denied by the sandbox, skip it and append a warning to the final report. Do not attempt path-traversal workarounds.",
+    "output_contract": "Return a finish_task summary formatted as a Markdown table with columns: Vulnerability, File Path, Severity, and Recommended Fix."
+  },
+  "pre_flight_actions": [
+    {
+      "tool": "terminal_proxy",
+      "args": { "command": "find . -type f -name '*.env*'" }
+    }
+  ]
+}

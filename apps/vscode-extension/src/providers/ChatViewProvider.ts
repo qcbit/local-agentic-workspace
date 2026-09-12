@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
 import { UdsClient } from '../ipc/UdsClient';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -95,10 +97,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private async _executeTask(goal: string, autoApprove: boolean = false) {
         if (!this._view) return;
 
+        let cleanGoal = goal;
+        let workflowConfig = null;
+
+        // 1. Intercept the tag and load the JSON
+        const workflowMatch = goal.match(/^@workflow:([\w-]+)\s*(.*)/is);
+        if (workflowMatch) {
+            const workflowId = workflowMatch[1];
+            cleanGoal = workflowMatch[2].trim();
+            
+            // Deterministically find the monorepo root relative to the extension
+            const monorepoRoot = path.resolve(this._extensionUri.fsPath, '../../');
+            const workflowPath = path.join(monorepoRoot, 'warp', 'workflows', `${workflowId}.json`);
+            
+            if (fs.existsSync(workflowPath)) {
+                workflowConfig = JSON.parse(fs.readFileSync(workflowPath, 'utf8'));
+            } else {
+                this._view.webview.postMessage({ command: 'agentError', text: `Workflow missing: ${workflowPath}` });
+                return;
+            }
+        }
+
         try {
+            // 2. Bundle the parsed JSON into the UDS payload
             const payload = {
-                goal: goal,
-                auto_approve: autoApprove
+                goal: cleanGoal,
+                auto_approve: autoApprove,
+                workflow_config: workflowConfig
             };
             const result = await this._udsClient.request('execute_agent_task', payload);
 

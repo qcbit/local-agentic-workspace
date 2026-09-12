@@ -143,6 +143,7 @@ class AgentState:
     max_iterations: int = 25
     summary: str = ""  # to track the running summary 
     run_id: str = "" # Unique execution token
+    workflow_context: Optional[Dict[str, Any]] = None  # Context engineering rules for the system prompt
 
 # --- Tool Dispatcher ---
 
@@ -599,7 +600,13 @@ class Agent:
         }
 
     # 2. Make the run method ASYNC so we can await the IPC socket tools
-    async def run(self, user_goal: str, ui_callback=None, auto_approve: bool = False) -> AgentState:
+    async def run(
+        self,
+        user_goal: str,
+        ui_callback=None,
+        auto_approve: bool = False,
+        workflow_config: Optional[Dict[str, Any]] = None,
+    ) -> AgentState:
         """The Main Agent Loop: Context -> Reason -> Tool -> Observation -> State Update."""
 
         # Helper function to print to terminal AND the Textual UI
@@ -619,6 +626,35 @@ class Agent:
             self.state.summary = ""
             self.state.run_id = str(uuid.uuid4())
             self.state.history.append(Message(role=Role.USER, content=user_goal))
+
+            self.state.workflow_context = None
+
+            # 1. Mutate Runtime State
+            if workflow_config:
+                orch_cfg = workflow_config.get("orchestrator_config", {})
+                if "max_iterations" in orch_cfg:
+                    self.state.max_iterations = orch_cfg["max_iterations"]
+                if "sandbox" in orch_cfg:
+                    self.sandbox_config.update(orch_cfg["sandbox"])
+                    self.dispatcher.sandbox_config = self.sandbox_config
+                if "search" in orch_cfg:
+                    self.search_config.update(orch_cfg["search"])
+                
+                # Store the context engineering rules for the system prompt
+                self.state.workflow_context = workflow_config.get("context_engineering", {})
+
+                # 2. Execute Pre-Flight Actions
+                for action in workflow_config.get("pre_flight_actions", []):
+                    tool = action.get("tool")
+                    args = action.get("args", {})
+                    log(f"[bold yellow]✈️ [Pre-Flight][/bold yellow] Dispatching {tool}...")
+                    
+                    if tool in self.tool_registry.tools:
+                        obs = await self.tool_registry.execute_tool_async(tool, args)
+                    else:
+                        obs = await self.dispatcher.execute_async(tool, args, auto_approve=True)
+                    
+                    self.state.history.append(Message(role=Role.TOOL, content=f"Pre-flight Observation: {obs}", name=tool))
             logger.info(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
         else:
             logger.info("[bold cyan]▶️ --- Resuming Agent Loop ---[/bold cyan]")
@@ -672,6 +708,19 @@ class Agent:
             - IF the user ONLY asks a question (e.g., "what is the active file?", "explain this code"), you must ignore all bugs and ONLY answer the question using the `finish_task` tool.
             - WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file. 
             """
+
+            if getattr(self.state, "workflow_context", None):
+                ctx = self.state.workflow_context
+                if ctx:
+                    system_prompt += f"""
+                    
+                    WORKFLOW CONSTRAINTS & ROLE:
+                    - ROLE: {ctx.get('role', '')}
+                    - TASK: {ctx.get('task', '')}
+                    - CONSTRAINTS: {json.dumps(ctx.get('constraints', []))}
+                    - FAILURE BEHAVIOR: {ctx.get('failure_behavior', '')}
+                    - OUTPUT CONTRACT: {ctx.get('output_contract', '')}
+                    """
 
             # 1. Determine if a critique is required
             needs_reflection = False
