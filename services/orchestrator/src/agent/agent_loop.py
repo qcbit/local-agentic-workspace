@@ -8,6 +8,7 @@ import operator
 import os
 from pathlib import Path
 import re
+from services.orchestrator.src.rag.search_manager import SearchManager
 from services.orchestrator.src.rag.vector_store import LocalVectorStore
 from services.orchestrator.src.memory.context_manager import SlidingContextManager
 import shlex
@@ -377,8 +378,23 @@ class ToolRegistry:
         # trigger the reverse-request over the socket to VS Code.
         self.uds_server = uds_server
         self.vector_store = LocalVectorStore() 
+        self.search_manager = SearchManager(uds_server=uds_server, vector_store=self.vector_store)
         
         self.tools = {
+            "web_search": {
+                "name": "web_search",
+                "description": "Searches the live web for technical documentation, API specs, errors, or current information. Triggers a tiered fallback: Tavily -> Brave -> SearxNG.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The dense search query string."
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
             "vscode_command": {
                 "name": "vscode_command",
                 "description": "Executes a native VS Code command. Use 'vscode.openFolder' to open a directory workspace, or 'vscode.open' to open a specific file in the editor.",
@@ -475,6 +491,23 @@ class ToolRegistry:
                 response = await self.uds_server.request_client_context(tool_name, arguments)
                 return response.get("content", "Error: No confirmation received from VS Code.")
 
+            elif tool_name == "web_search":
+                query = arguments.get("query")
+                if not query or not isinstance(query, str):
+                    return "Error: A non-empty 'query' string is required for web_search."
+                
+                # Retrieve dynamic character budget if accessible, or default to 4000
+                max_chars = arguments.get("max_chars", 4000)
+                run_id = arguments.get("run_id", "default_run")
+                search_config = arguments.get("search_config", {})
+                
+                return await self.search_manager.execute_search(
+                    query=query,
+                    run_id=run_id,
+                    search_config=search_config,
+                    max_chars=max_chars
+                )
+
             elif tool_name in ["get_active_file_content", "get_selected_text"]:
                 if not self.uds_server:
                     return "Error: IPC Server not attached to ToolRegistry."
@@ -503,6 +536,7 @@ class Agent:
         self.uds_server = uds_server
         self.workspace_root = workspace_root or os.getcwd()
         self.sandbox_config = config.get("sandbox", {})
+        self.search_config = config.get("search", {})
         
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
@@ -716,6 +750,12 @@ class Agent:
 
             # 4. Route the tool call to the correct handler
             if tool_name in self.tool_registry.tools:
+                if tool_name == "web_search":
+                    # Inject run-specific metadata and profile limits
+                    tool_args["run_id"] = self.state.run_id
+                    tool_args["search_config"] = self.search_config
+                    tool_args["max_chars"] = getattr(self.dispatcher, "max_file_read_chars", 4000)
+
                 # Execute new async tools (search_codebase, get_active_file_content)
                 observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
             else:
