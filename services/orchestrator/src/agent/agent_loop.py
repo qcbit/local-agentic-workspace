@@ -159,6 +159,23 @@ def is_path_safe(workspace_root: str, target_path: str) -> bool:
     except (ValueError, RuntimeError):
         return False
 
+def validate_python_syntax(code: str) -> str:
+    """Checks Python code for syntax errors using the ast module natively."""
+    import ast
+    if not code:
+        return "Error: No code provided."
+    try:
+        ast.parse(code)
+        return "✅ Syntax Check Passed: The provided Python code is syntactically valid."
+    except SyntaxError as e:
+        # Provide detailed error traceback to help the model self-correct
+        error_msg = f"❌ SyntaxError: {e.msg} at line {e.lineno}"
+        if e.text:
+            error_msg += f"\nCode snippet: {e.text.strip()}"
+        return error_msg
+    except Exception as e:
+        return f"❌ Validation Error: {str(e)}"
+
 class ToolDispatcher:
     """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
     
@@ -193,8 +210,12 @@ class ToolDispatcher:
                 return await self._handle_terminal_proxy_async(arguments, auto_approve=auto_approve)
             elif tool_name == "python_repl":
                 return execute_python_repl(arguments.get("code", ""))
+            elif tool_name == "validate_python_syntax":
+                return validate_python_syntax(arguments.get("code", ""))
             elif tool_name == "finish_task":
                 return "Task marked as complete by the agent."
+            elif tool_name == "apply_inline_diff":
+                return await self._handle_apply_inline_diff_async(arguments, auto_approve=auto_approve)
             else:
                 return f"Error: Tool '{tool_name}' not recognized."
         except Exception as e:
@@ -371,6 +392,59 @@ class ToolDispatcher:
         else:
             return "Action Blocked: The user denied the shell execution request."
 
+    async def _handle_apply_inline_diff_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
+        import difflib
+        path = args.get("file_path", "")
+        search_string = args.get("search_string", "")
+        replace_string = args.get("replace_string", "")
+        
+        if not path or not search_string:
+            return "Error: file_path and search_string are required."
+
+        # Force surgical diffs by rejecting massive search blocks
+        if len(search_string) > 1000:
+            return "Error: search_string is too large. You must target a specific function or block of code (under 1000 characters), not the entire file or class."
+            
+        # Sandbox Check
+        abs_target = os.path.abspath(os.path.expanduser(path))
+        abs_workspace = os.path.abspath(self.workspace_root)
+        if self.sandbox_config.get("strict_mode", True) and not abs_target.startswith(abs_workspace):
+            return f"Error: Path '{path}' is outside authorized workspace root."
+            
+        if not os.path.isfile(path):
+            return f"Error: File '{path}' does not exist."
+            
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+            
+        count = content.count(search_string)
+        if count == 0:
+            return "Error: search_string not found in file. Ensure exact whitespace and indentation match."
+        if count > 1:
+            return f"Error: search_string found {count} times. Include more surrounding lines to make it unique."
+            
+        new_content = content.replace(search_string, replace_string)
+        
+        # Generate the programmatic diff
+        diff_lines = list(difflib.unified_diff(
+            content.splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile=f"a/{os.path.basename(path)}",
+            tofile=f"b/{os.path.basename(path)}",
+            n=3
+        ))
+        
+        diff_str = "".join(diff_lines)
+        if diff_str:
+            logger.info(f"📝 [Auto-Diff] Changes staged for {path}:\n{diff_str}")
+        
+        # Route to the existing Tier 2 UI approval flow
+        return await self._handle_file_system_async({
+            "action": "write",
+            "path": path,
+            "content": new_content
+        }, auto_approve=auto_approve)
+
 # --- Tool Registry ---
 
 class ToolRegistry:
@@ -382,6 +456,41 @@ class ToolRegistry:
         self.search_manager = SearchManager(uds_server=uds_server, vector_store=self.vector_store)
         
         self.tools = {
+            "terminal_proxy": {
+                "name": "terminal_proxy",
+                "description": "Executes a shell command. Use this for running tests, compiling, or executing scripts.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "The bash command to execute." }
+                    },
+                    "required": ["command"]
+                }
+            },
+            "file_system": {
+                "name": "file_system",
+                "description": "Reads or writes files to the local disk.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "description": "Either 'read' or 'write'." },
+                        "path": { "type": "string", "description": "The target file path." },
+                        "content": { "type": "string", "description": "The string to write (required if action is 'write')." }
+                    },
+                    "required": ["action", "path"]
+                }
+            },
+            "finish_task": {
+                "name": "finish_task",
+                "description": "Marks the agent loop as complete. ALWAYS call this when your goal is achieved.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": { "type": "string", "description": "The comprehensive final answer or requested information." }
+                    },
+                    "required": ["summary"]
+                }
+            },
             "web_search": {
                 "name": "web_search",
                 "description": "Searches the live web for technical documentation, API specs, errors, or current information. Triggers a tiered fallback: Tavily -> Brave -> SearxNG.",
@@ -412,6 +521,20 @@ class ToolRegistry:
                         }
                     },
                     "required": ["command", "target_path"]
+                }
+            },
+            "validate_python_syntax": {
+                "name": "validate_python_syntax",
+                "description": "Natively validates Python code for syntax errors without executing it. ALWAYS use this to verify refactored code strings before writing them to the file system.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "The complete Python code to validate."
+                        }
+                    },
+                    "required": ["code"]
                 }
             },
             "python_repl": {
@@ -456,6 +579,19 @@ class ToolRegistry:
                 "parameters": {
                     "type": "object",
                     "properties": {}
+                }
+            },
+            "apply_inline_diff": {
+                "name": "apply_inline_diff",
+                "description": "Precisely replaces a specific string block in a file. Use this to surgically modify code without rewriting the entire file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string", "description": "Target file path." },
+                        "search_string": { "type": "string", "description": "The EXACT string block to be replaced. Must include exact original indentation and whitespace." },
+                        "replace_string": { "type": "string", "description": "The new string block to insert." }
+                    },
+                    "required": ["file_path", "search_string", "replace_string"]
                 }
             }
         }
@@ -520,6 +656,9 @@ class ToolRegistry:
 
             elif tool_name == "python_repl":
                 return execute_python_repl(arguments.get("code", ""))
+
+            elif tool_name == "validate_python_syntax":
+                return validate_python_syntax(arguments.get("code", ""))
 
             else:
                 return f"Tool {tool_name} not found."
@@ -640,6 +779,11 @@ class Agent:
                 if "search" in orch_cfg:
                     self.search_config.update(orch_cfg["search"])
                 
+                # Strip forbidden tools
+                forbidden_tools = workflow_config.get("orchestrator_config", {}).get("forbidden_tools", [])
+                for tool in forbidden_tools:
+                    self.tool_registry.tools.pop(tool, None)
+
                 # Store the context engineering rules for the system prompt
                 self.state.workflow_context = workflow_config.get("context_engineering", {})
 
@@ -672,11 +816,6 @@ class Agent:
             system_prompt = f"""You are an autonomous agent. You must respond ONLY with valid JSON. 
 
             Do not include any conversational text or markdown formatting. 
-            You have access to the following tools:
-            1. 'terminal_proxy' - args: {{"command": "<bash command>"}}
-            2. 'file_system' - args: {{"action": "<read/write>", "path": "<file path>", "content": "<string to write>"}} 
-            3. 'python_repl' - args: {{"code": "<valid python code>"}}
-            4. 'finish_task' - args: {{"summary": "<The comprehensive final answer, data, or requested information to show the user>"}}
 
             AVAILABLE CONTEXT TOOLS:
             {tool_descriptions}
@@ -798,18 +937,25 @@ class Agent:
                 break
 
             # 4. Route the tool call to the correct handler
-            if tool_name in self.tool_registry.tools:
+            dispatcher_tools = ["file_system", "terminal_proxy", "python_repl", "apply_inline_diff"]
+            
+            # First, check if the tool was dynamically stripped from the registry
+            if tool_name not in self.tool_registry.tools and tool_name != "finish_task":
+                observation = f"Error: Tool '{tool_name}' is disabled or not recognized in this workflow."
+                
+            # Route to the Dispatcher class
+            elif tool_name in dispatcher_tools:
+                observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=auto_approve)
+                
+            # Route to the Registry class
+            else:
                 if tool_name == "web_search":
                     # Inject run-specific metadata and profile limits
                     tool_args["run_id"] = self.state.run_id
                     tool_args["search_config"] = self.search_config
                     tool_args["max_chars"] = getattr(self.dispatcher, "max_file_read_chars", 4000)
 
-                # Execute new async tools (search_codebase, get_active_file_content)
-                observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
-            else:
-                # Execute original synchronous tools (terminal_proxy, file_system)
-                observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=auto_approve)                
+                observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)      
 
             log(f"[bold blue]👀 [Observation][/bold blue]\n{observation}")
 
