@@ -1,0 +1,15 @@
+# This file contains the updated Makefile instructions for Windows builds
+
+# ... (previous content remains unchanged) ...
+
+build-backend: build-windows
+	@echo "Building backend with updated spec file..."
+	@pyinstaller uds_server-win-x64.spec --clean
+	@mkdir -p apps/vscode-extension/bin
+	@cp dist/uds_server-win-x64 apps/vscode-extension/bin/uds_server-win-x64
+
+build-windows:
+	@echo "Windows build preparation step"
+	# This would be the target where we ensure the Windows spec file is used
+
+# ... (rest of previous content remains unchanged) ...
