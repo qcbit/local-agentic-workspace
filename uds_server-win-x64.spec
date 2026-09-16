@@ -1,13 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
 
+# Dynamically gather all hidden imports, binaries, and data for aiohttp
+aio_datas, aio_binaries, aio_hiddenimports = collect_all('aiohttp')
 
 a = Analysis(
     ['services/orchestrator/src/ipc/uds_server.py'],
     pathex=['.', 'services/orchestrator/src'],
-    binaries=[],
+    binaries=[] + aio_binaries,
     datas=[
         ('services/orchestrator/config.json', 'services/orchestrator')
-    ],
+    ] + aio_datas,
     hiddenimports=[
         'services',
         'rag',
@@ -16,7 +19,7 @@ a = Analysis(
         'lancedb',
         'fastembed',
         'aiohttp'
-    ],
+    ] + aio_hiddenimports,
     hookspath=[],
     hooksconfig={}
 ,
