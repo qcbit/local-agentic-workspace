@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3](https://github.com/qcbit/local-agentic-workspace/compare/v0.9.2...v0.9.3) (2026-09-16)
+
+
+### Bug Fixes
+
+* **CI:** trigger manual release build ([d54f663](https://github.com/qcbit/local-agentic-workspace/commit/d54f6639e7a39e1124c09f6ac5f962e9cbca3509))
+
 ## [0.9.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.9.1...v0.9.2) (2026-09-14)
 
 
