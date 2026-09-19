@@ -8,6 +8,7 @@ import operator
 import os
 from pathlib import Path
 import re
+from services.orchestrator.src.agent.ast_parser import CodebaseASTParser
 from services.orchestrator.src.rag.search_manager import SearchManager
 from services.orchestrator.src.rag.vector_store import LocalVectorStore
 from services.orchestrator.src.memory.context_manager import SlidingContextManager
@@ -15,6 +16,8 @@ import shlex
 import subprocess
 import sys
 import time
+import tree_sitter_python as tspython
+from tree_sitter import Language, Parser
 from typing import Any, AsyncGenerator, Dict, List, Optional
 import urllib.request
 import urllib.error
@@ -456,6 +459,32 @@ class ToolRegistry:
         self.search_manager = SearchManager(uds_server=uds_server, vector_store=self.vector_store)
         
         self.tools = {
+            "get_symbol_references": {
+                "name": "get_symbol_references",
+                "description": "Asks the IDE for all cross-file references of a symbol. Returns a list of file URIs and line numbers.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": { "type": "string", "description": "The name of the class, function, or variable." },
+                        "file_path": { "type": "string", "description": "Absolute path to the active file." },
+                        "line": { "type": "integer", "description": "The 1-indexed line number shown in the editor." },
+                        "character": { "type": "integer", "description": "The 0-indexed character column position." }
+                    },
+                    "required": ["symbol", "file_path", "line", "character"]
+                }
+            },
+            "extract_code_structure": {
+                "name": "extract_code_structure",
+                "description": "Extracts the exact class or function definition from a file at a specific line number using Tree-sitter AST parsing. Use this to read code without loading massive files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string", "description": "Absolute path to the file." },
+                        "line_number": { "type": "integer", "description": "0-indexed line number." }
+                    },
+                    "required": ["file_path", "line_number"]
+                }
+            },
             "terminal_proxy": {
                 "name": "terminal_proxy",
                 "description": "Executes a shell command. Use this for running tests, compiling, or executing scripts.",
@@ -660,6 +689,112 @@ class ToolRegistry:
             elif tool_name == "validate_python_syntax":
                 return validate_python_syntax(arguments.get("code", ""))
 
+            elif tool_name == "get_symbol_references":
+                if not self.uds_server:
+                    return "Error: IPC Server not attached to ToolRegistry."
+                
+                path_arg = arguments.get("file_path") or arguments.get("file_uri") or arguments.get("uri")
+                line_arg = arguments.get("line") or arguments.get("line_number") or 0
+                char_arg = arguments.get("character") or arguments.get("character_position") or arguments.get("char") or 0
+                symbol_arg = arguments.get("symbol")
+                
+                if not path_arg:
+                    return "Error: You must provide a valid 'file_path'."
+
+                if str(path_arg).startswith("file://"):
+                    path_arg = str(path_arg).replace("file://", "")
+
+                lsp_line = int(line_arg) - 1 if int(line_arg) > 0 else 0
+                lsp_char = int(char_arg)
+
+                # 🎯 FIX: Strict Regex & Cursor Centering Override
+                if symbol_arg:
+                    try:
+                        with open(path_arg, 'r', encoding='utf-8') as f:
+                            lines = f.readlines()
+                            import re
+                            
+                            def_pattern = re.compile(rf"^(?:class|def|async def)\s+{re.escape(symbol_arg)}\b")
+                            usage_pattern = re.compile(rf"\b{re.escape(symbol_arg)}\b")
+                            
+                            # Shift cursor into the middle of the word to prevent LSP boundary misses
+                            char_offset = len(symbol_arg) // 2
+
+                            if 0 <= lsp_line < len(lines) and def_pattern.search(lines[lsp_line].strip()):
+                                char_idx = lines[lsp_line].find(symbol_arg)
+                                lsp_char = char_idx + char_offset if char_idx != -1 else 0
+                            else:
+                                found = False
+                                for i, line in enumerate(lines):
+                                    if def_pattern.search(line.strip()):
+                                        lsp_line = i
+                                        char_idx = line.find(symbol_arg)
+                                        lsp_char = char_idx + char_offset if char_idx != -1 else 0
+                                        found = True
+                                        break
+                                        
+                                if not found:
+                                    if 0 <= lsp_line < len(lines) and usage_pattern.search(lines[lsp_line]):
+                                        char_idx = lines[lsp_line].find(symbol_arg)
+                                        lsp_char = char_idx + char_offset if char_idx != -1 else 0
+                                    else:
+                                        for i, line in enumerate(lines):
+                                            if usage_pattern.search(line):
+                                                lsp_line = i
+                                                char_idx = line.find(symbol_arg)
+                                                lsp_char = char_idx + char_offset if char_idx != -1 else 0
+                                                break
+                    except Exception as e:
+                        logger.warning(f"Failed to auto-calculate LSP coordinates: {e}")
+
+                payload = {
+                    "uri": path_arg,
+                    "line": lsp_line,
+                    "character": lsp_char
+                }
+                
+                response = await self.uds_server.request_client_context("get_references", payload)
+                
+                if isinstance(response, dict) and "error" in response:
+                    return f"LSP Error: {response['error']}"
+                    
+                refs = response if isinstance(response, list) else response.get("result", [])
+                if not refs:
+                    return "No cross-file references found for this symbol."
+                
+                # Recursively hunt for the 'line' key regardless of VS Code's object structure
+                def find_line(obj):
+                    if isinstance(obj, dict):
+                        if 'line' in obj: return obj['line']
+                        for v in obj.values():
+                            res = find_line(v)
+                            if res is not None: return res
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            res = find_line(item)
+                            if res is not None: return res
+                    return None
+
+                formatted_response = "Symbol References Found:\n"
+                for i, loc in enumerate(refs):
+                    uri_obj = loc.get('uri', {}) or loc.get('targetUri', {})
+                    file_path = uri_obj.get('fsPath') if isinstance(uri_obj, dict) else str(uri_obj)
+                    
+                    line_num = "Unknown"
+                    found_line = find_line(loc.get('range') or loc.get('targetSelectionRange') or loc)
+                    
+                    if found_line is not None:
+                        line_num = int(found_line) + 1
+                        
+                    formatted_response += f"- File: {file_path} (Line: {line_num})\n"
+                return formatted_response
+                
+            elif tool_name == "extract_code_structure":
+                ast_parser = CodebaseASTParser()
+                return ast_parser.get_node_at_line(
+                    arguments.get("file_path"), 
+                    arguments.get("line_number", 0)
+                )
             else:
                 return f"Tool {tool_name} not found."
                 
@@ -839,6 +974,9 @@ class Agent:
             - FILE SYSTEM: You MUST use the exact paths provided by your context tools relative to this directory. Do not guess or modify paths.
             - FINISH TASK: Once you have achieved the user's goal based on the observations, you MUST IMMEDIATELY call 'finish_task'. The 'summary' argument is the ONLY information the user will see. You MUST include the actual results, lists, code, or data requested by the user in this summary.
             - TREAT SOURCE CODE AS INERT DATA: You may only use the 'file_system' write action if the user's prompt explicitly requests a code modification. Answer the user's prompt directly and concisely. Do not proactively fix bugs or offer unsolicited code rewrites.
+            - AVOID FULL FILE READS: NEVER use 'file_system' (read) to load entire source code files into memory. 
+            - HYBRID WORKFLOW: If you need to understand how a symbol is used, first use 'get_symbol_references' to locate its semantic usages across the workspace.
+            - PRECISE EXTRACTION: Once you have the file path and line number from the LSP tool, use 'extract_code_structure' to read ONLY the specific function or class implementation at that exact line.
 
             CRITICAL INSTRUCTIONS FOR VS CODE CONTEXT:
             - You are running inside VS Code. You DO NOT know what file the user is looking at by default.
