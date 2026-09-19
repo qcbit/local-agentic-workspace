@@ -444,7 +444,7 @@ class ToolDispatcher:
         # Route to the existing Tier 2 UI approval flow
         return await self._handle_file_system_async({
             "action": "write",
-            "path": path,
+            "path": abs_target,
             "content": new_content
         }, auto_approve=auto_approve)
 
@@ -905,6 +905,12 @@ class Agent:
 
             # 1. Mutate Runtime State
             if workflow_config:
+                # Dynamically update the workspace root if VS Code provides it
+                if "workspace_root" in workflow_config:
+                    dynamic_root = workflow_config["workspace_root"]
+                    self.workspace_root = dynamic_root
+                    self.dispatcher.workspace_root = dynamic_root
+
                 orch_cfg = workflow_config.get("orchestrator_config", {})
                 if "max_iterations" in orch_cfg:
                     self.state.max_iterations = orch_cfg["max_iterations"]
