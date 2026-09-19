@@ -12,3 +12,8 @@ pyinstaller
 openai
 azure-identity
 aiohttp
+tree-sitter 
+tree-sitter-python 
+tree-sitter-rust 
+tree-sitter-c 
+tree-sitter-cpp
