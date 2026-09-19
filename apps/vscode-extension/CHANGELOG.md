@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.9.4...v0.10.0) (2026-09-19)
+
+
+### Features
+
+* **AI UX:** enhance agent sandbox, dynamic context scaling, and AST … ([f0abd16](https://github.com/qcbit/local-agentic-workspace/commit/f0abd167879f85beb7fb426c2656589333537765))
+* **AI UX:** enhance agent sandbox, dynamic context scaling, and AST parsing ([49d44e9](https://github.com/qcbit/local-agentic-workspace/commit/49d44e9e514df3c6ff8f827d442fcc6fe96363f5))
+
 ## [0.9.4](https://github.com/qcbit/local-agentic-workspace/compare/v0.9.3...v0.9.4) (2026-09-18)
 
 
