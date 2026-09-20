@@ -164,7 +164,16 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // 1. Register CodeLens to the EXACT scheme used by your DiffProvider
+    // 1. Instantiate Providers FIRST
+    const diffProvider = new AgenticDiffProvider();
+    context.subscriptions.push(
+        vscode.workspace.registerTextDocumentContentProvider(
+            AgenticDiffProvider.scheme, 
+            diffProvider
+        )
+    );
+
+    // Register CodeLens to the EXACT scheme used by your DiffProvider
     context.subscriptions.push(
         vscode.languages.registerCodeLensProvider(
             { scheme: AgenticDiffProvider.scheme }, 
@@ -181,18 +190,32 @@ export async function activate(context: vscode.ExtensionContext) {
                 const originalUri = vscode.Uri.file(filePath);
                 const virtualUri = AgenticDiffProvider.getVirtualUri(originalUri);
 
+                // 🎯 FIX: Create the file (and parent directories) if it doesn't exist
+                if (!fs.existsSync(filePath)) {
+                    const dirPath = path.dirname(filePath);
+                    if (!fs.existsSync(dirPath)) {
+                        fs.mkdirSync(dirPath, { recursive: true });
+                    }
+                    fs.writeFileSync(filePath, ''); // Create an empty placeholder file
+                }
+
                 // Populate your existing virtual diff provider with the AI's content
                 diffProvider.updateContent(virtualUri, newContent);
+
+                // Tell the CodeLens provider to show the Accept/Reject buttons over the code
+                codeLensProvider.setPendingState(true);
 
                 // Open the diff view natively
                 vscode.commands.executeCommand(
                     'vscode.diff',
                     originalUri,
                     virtualUri,
-                    `Agent Proposed Changes ↔ ${path.basename(filePath)}`
+                    `Agent Proposed Changes ↔ ${path.basename(filePath)}`,
+                    { preview: false, preserveFocus: false } // 🎯 Ensure the diff opens in a new tab and takes focus
+
                 );
 
-                // Tell the CodeLens provider to show the Accept/Reject buttons over the code
+                // Re-trigger the event after the editor has mounted to eliminate race conditions
                 codeLensProvider.setPendingState(true);
             });
         })
@@ -497,12 +520,11 @@ export async function activate(context: vscode.ExtensionContext) {
     // 6. Initialize the AST Provider
     const astProvider = new ASTProvider(context.extensionUri);
 
-    // 7. Register the Diff Provider
-    const diffProvider = new AgenticDiffProvider();
+    // Register CodeLens to the EXACT scheme used by your DiffProvider
     context.subscriptions.push(
-        vscode.workspace.registerTextDocumentContentProvider(
-            AgenticDiffProvider.scheme, 
-            diffProvider
+        vscode.languages.registerCodeLensProvider(
+            { scheme: AgenticDiffProvider.scheme }, 
+            codeLensProvider
         )
     );
 
