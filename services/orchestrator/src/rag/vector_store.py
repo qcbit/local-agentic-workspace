@@ -5,15 +5,16 @@ import os
 import pyarrow as pa
 import requests
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class LocalVectorStore:
-    def __init__(self):
+    def __init__(self, workspace_root: Optional[str] = None):
         # 1. Initialize LanceDB
-        db_path = os.path.join(os.getcwd(), ".lancedb") 
+        self.workspace_root = workspace_root or os.getcwd()
+        db_path = os.path.join(self.workspace_root, ".lancedb") 
         self.db = lancedb.connect(db_path)
         self.table_name = "codebase"
         

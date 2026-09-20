@@ -910,6 +910,13 @@ class Agent:
                     dynamic_root = workflow_config["workspace_root"]
                     self.workspace_root = dynamic_root
                     self.dispatcher.workspace_root = dynamic_root
+                    
+                    # CRITICAL: Re-anchor LanceDB to the new project directory for dev mode and local vector store usage
+                    from services.orchestrator.src.rag.vector_store import LocalVectorStore
+                    self.tool_registry.vector_store = LocalVectorStore(workspace_root=dynamic_root)
+                    
+                    # Also update the SearchManager since it holds a reference to the vector store
+                    self.tool_registry.search_manager.vector_store = self.tool_registry.vector_store
 
                 orch_cfg = workflow_config.get("orchestrator_config", {})
                 if "max_iterations" in orch_cfg:
