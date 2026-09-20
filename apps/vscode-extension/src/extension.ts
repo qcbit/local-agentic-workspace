@@ -190,6 +190,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 const originalUri = vscode.Uri.file(filePath);
                 const virtualUri = AgenticDiffProvider.getVirtualUri(originalUri);
 
+                let firstChangedLine = 0;
+
                 // 🎯 FIX: Create the file (and parent directories) if it doesn't exist
                 if (!fs.existsSync(filePath)) {
                     const dirPath = path.dirname(filePath);
@@ -197,6 +199,24 @@ export async function activate(context: vscode.ExtensionContext) {
                         fs.mkdirSync(dirPath, { recursive: true });
                     }
                     fs.writeFileSync(filePath, ''); // Create an empty placeholder file
+                } else {
+                    // 🎯 Calculate the first line of difference for existing files
+                    const originalContent = fs.readFileSync(filePath, 'utf8');
+                    const originalLines = originalContent.split(/\r?\n/);
+                    const newLines = newContent.split(/\r?\n/);
+                    
+                    while (
+                        firstChangedLine < originalLines.length && 
+                        firstChangedLine < newLines.length && 
+                        originalLines[firstChangedLine] === newLines[firstChangedLine]
+                    ) {
+                        firstChangedLine++;
+                    }
+                    
+                    // Failsafe: If the agent returned identical code, or if the file is massive, cap it
+                    if (firstChangedLine >= newLines.length) {
+                        firstChangedLine = 0; 
+                    }
                 }
 
                 // Populate your existing virtual diff provider with the AI's content
@@ -216,7 +236,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 );
 
                 // Re-trigger the event after the editor has mounted to eliminate race conditions
-                codeLensProvider.setPendingState(true);
+                codeLensProvider.setPendingState(true, firstChangedLine);
             });
         })
     );

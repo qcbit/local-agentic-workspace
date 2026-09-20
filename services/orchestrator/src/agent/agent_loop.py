@@ -228,27 +228,36 @@ class ToolDispatcher:
         action = args.get("action")
         path = args.get("path", ".")
         
+        # 1. Anchor relative paths strictly to the VS Code workspace root
+        expanded_path = os.path.expanduser(path)
+        if not os.path.isabs(expanded_path):
+            expanded_path = os.path.join(self.workspace_root, expanded_path)
+            
+        abs_target = os.path.abspath(expanded_path)
+        abs_workspace = os.path.abspath(self.workspace_root)
+
         # 🛡️ 🎯 NEW DYNAMIC SANDBOX ENFORCEMENT
         is_authorized = False
         if not self.sandbox_config.get("strict_mode", True):
             is_authorized = True
         else:
-            abs_target = os.path.abspath(os.path.expanduser(path))
-            abs_workspace = os.path.abspath(self.workspace_root)
-            
             # Check primary workspace
-            if abs_target.startswith(abs_workspace):
+            if os.path.commonpath([abs_target, abs_workspace]) == abs_workspace:
                 is_authorized = True
             else:
                 # Check authorized external paths
                 for allowed_dir in self.sandbox_config.get("allowed_external_paths", []):
                     abs_allowed = os.path.abspath(os.path.expanduser(allowed_dir))
-                    if abs_target.startswith(abs_allowed):
+                    if os.path.commonpath([abs_target, abs_allowed]) == abs_allowed:
                         is_authorized = True
                         break
 
         if not is_authorized:
             return f"error: command blocked by sandbox. Path '{path}' is outside authorized workspace root and not in allowed_external_paths."
+
+        # 3. CRITICAL: Override the local path variable with the fully resolved absolute path
+        # so subsequent os.listdir() or open() calls don't read the daemon's CWD.
+        path = abs_target
 
         # TIER 1: Read-only actions (Auto-Approve)
         if action == "read":

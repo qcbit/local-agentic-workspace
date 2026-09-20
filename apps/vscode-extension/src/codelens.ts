@@ -7,9 +7,12 @@ export class AgentApprovalCodeLensProvider implements vscode.CodeLensProvider {
     public readonly onDidChangeCodeLenses: vscode.Event<void> = this._onDidChangeCodeLenses.event;
 
     private isPendingApproval: boolean = false;
+    private targetLine: number = 0; // Default to top of file
 
-    public setPendingState(state: boolean) {
+    // Accept the specific line where the first change occurs
+    public setPendingState(state: boolean, line: number = 0) {
         this.isPendingApproval = state;
+        this.targetLine = line;
         this._onDidChangeCodeLenses.fire(); // Trigger UI redraw
     }
 
@@ -23,16 +26,16 @@ export class AgentApprovalCodeLensProvider implements vscode.CodeLensProvider {
             return [];
         }
 
-        // Place the buttons at the very top of the file (Line 0)
-        const topOfFile = new vscode.Range(0, 0, 0, 0);
+        // Anchor to the dynamic target line instead of 0
+        const targetRange = new vscode.Range(this.targetLine, 0, this.targetLine, 0);
 
-        const approveLens = new vscode.CodeLens(topOfFile, {
+        const approveLens = new vscode.CodeLens(targetRange, {
             title: "$(check) Accept Change",
             command: "agenticWorkspace.approveWrite",
             tooltip: "Write these changes to disk"
         });
 
-        const rejectLens = new vscode.CodeLens(topOfFile, {
+        const rejectLens = new vscode.CodeLens(targetRange, {
             title: "$(close) Reject Change",
             command: "agenticWorkspace.rejectWrite",
             tooltip: "Discard these changes"
