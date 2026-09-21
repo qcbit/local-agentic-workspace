@@ -142,6 +142,9 @@ export const ChatPanel: React.FC = () => {
     const handleSend = () => {
         if (!input.trim() || isLoading) return;
         
+        // 1. Capture the existing history before adding the new message
+        const currentHistory = [...messages];
+        
         setMessages(prev => [...prev, { role: 'user', content: input }]);
         setIsLoading(true);
         setIsPaused(false);
@@ -152,7 +155,8 @@ export const ChatPanel: React.FC = () => {
         vscode.postMessage({
             command: 'executeTask',
             goal: input,
-            autoApprove: isAutoApprove
+            autoApprove: isAutoApprove,
+            messages: currentHistory // 🎯 Forward the UI history to the extension host
         });
         
         setInput('');

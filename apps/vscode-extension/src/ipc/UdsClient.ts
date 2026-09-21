@@ -242,6 +242,11 @@ export class UdsClient extends EventEmitter {
                                 const filePath = msg.params?.path;
                                 const newContent = msg.params?.content;
                                 
+                                // 🎯 Force an explicit toaster popup so you know a write is pending
+                                vscode.window.showInformationMessage(
+                                    `Agent is proposing changes to ${path.basename(filePath)}. Please review the opened Diff window to Approve or Reject.`
+                                );
+                                
                                 const response: any = await vscode.commands.executeCommand(
                                     'agenticWorkspace.handleWriteRequest', 
                                     filePath, 

@@ -69,7 +69,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.command || data.type) {
                 case 'executeTask':
-                    await this._executeTask(data.goal, data.autoApprove ?? false);
+                    await this._executeTask(data.goal, data.autoApprove ?? false, data.messages || []);
                     break;
                 case 'stop_agent':
                     console.log("🛑 Received stop signal from UI. Routing to IPC...");
@@ -94,19 +94,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 /**
      * Executes an agent task via the IPC socket and returns the result to the UI.
      */
-    private async _executeTask(goal: string, autoApprove: boolean = false) {
+    private async _executeTask(goal: string, autoApprove: boolean = false, chatHistory: any[] = []) {
         if (!this._view) return;
 
         let cleanGoal = goal;
-        let workflowConfig = null;
+        // 1. Initialize as an empty object instead of null
+        let workflowConfig: any = {}; 
 
-        // 1. Intercept the tag and load the JSON
-        const workflowMatch = goal.match(/^@workflow:([\w-]+)\s*(.*)/is);
+        // 2. Intercept the tag and load the JSON (Existing logic)
+        const workflowMatch = /^@workflow:([\w-]+)\s*(.*)/is.exec(goal);
         if (workflowMatch) {
             const workflowId = workflowMatch[1];
             cleanGoal = workflowMatch[2].trim();
             
-            // Deterministically find the monorepo root relative to the extension
             const monorepoRoot = path.resolve(this._extensionUri.fsPath, '../../');
             const workflowPath = path.join(monorepoRoot, 'warp', 'workflows', `${workflowId}.json`);
             
@@ -118,13 +118,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             }
         }
 
+        // 🎯 3. ALWAYS inject the active workspace root, regardless of workflow status
+        const activeWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        workflowConfig.workspace_root = activeWorkspace;
+
         try {
-            // 2. Bundle the parsed JSON into the UDS payload
+            // 4. Bundle the JSON into the UDS payload
             const payload = {
                 goal: cleanGoal,
                 auto_approve: autoApprove,
-                workflow_config: workflowConfig
+                workflow_config: workflowConfig, // This now reliably contains the workspace_root
+                history: chatHistory
             };
+            
             const result = await this._udsClient.request('execute_agent_task', payload);
 
             if (result && result.status === 'paused_max_iterations') {
