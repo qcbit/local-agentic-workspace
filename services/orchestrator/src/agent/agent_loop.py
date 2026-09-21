@@ -889,6 +889,7 @@ class Agent:
         ui_callback=None,
         auto_approve: bool = False,
         workflow_config: Optional[Dict[str, Any]] = None,
+        history_payload: list = None
     ) -> AgentState:
         """The Main Agent Loop: Context -> Reason -> Tool -> Observation -> State Update."""
 
@@ -899,34 +900,65 @@ class Agent:
             else:
                 logger.info(msg)
 
-        # Only reset the run state if a NEW goal is provided
+        # 1. REHYDRATE STATE: If Python restarted, but the UI has history
+        if history_payload and not self.state.history:
+            log("🔄 [System] Restoring session context from UI...")
+            # Fallback to the first message's content if no new goal is provided
+            self.state.user_goal = history_payload[0].get("content", "") if history_payload else user_goal
+            
+            for msg_data in history_payload:
+                ui_role = msg_data.get("role", "user").lower()
+                
+                # Strip internal monologue from the rehydrated context window
+                if ui_role == "thought":
+                    continue
+                    
+                # Map React frontend roles to backend Enums
+                role_str = "user"
+                if ui_role == "agent":
+                    role_str = "assistant"
+                elif ui_role == "error":
+                    role_str = "tool"  # Treat system errors as tool observations
+                elif ui_role == "user":
+                    role_str = "user"
+
+                try:
+                    self.state.history.append(Message(
+                        role=Role(role_str), 
+                        content=msg_data.get("content", ""), 
+                        name=msg_data.get("name", "ui_rehydration")
+                    ))
+                except ValueError:
+                    continue
+
+        # 2. HANDLE NEW INPUT
         if user_goal:
-            self.state.user_goal = user_goal
-            self.state.is_complete = False
-            self.state.is_canceled = False
-            self.state.iterations = 0
-            self.state.max_iterations = self.max_iterations  # Ensure state uses configured limit
-            self.state.summary = ""
-            self.state.run_id = str(uuid.uuid4())
+            # If we have history (from rehydration or an ongoing session), this is a follow-up
+            is_followup = len(self.state.history) > 0
+            
+            if not is_followup:
+                # Brand new task
+                self.state.user_goal = user_goal
+                self.state.is_complete = False
+                self.state.is_canceled = False
+                self.state.iterations = 0
+                self.state.max_iterations = self.max_iterations 
+                self.state.summary = ""
+                self.state.run_id = str(uuid.uuid4())
+                self.state.workflow_context = None
+                logger.info(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
+            else:
+                # Continuing an existing task
+                self.state.is_complete = False 
+                self.state.is_canceled = False
+                self.state.iterations = 0 # Reset iteration counter for this new segment
+                logger.info(f"[bold cyan]▶️ --- Continuing Agent Loop ---[/bold cyan]\nFollow-up: {user_goal}")
+
+            # Append the user's new follow-up prompt
             self.state.history.append(Message(role=Role.USER, content=user_goal))
 
-            self.state.workflow_context = None
-
-            # 1. Mutate Runtime State
+            # 3. APPLY WORKFLOW MUTATIONS (Only if provided)
             if workflow_config:
-                # Dynamically update the workspace root if VS Code provides it
-                if "workspace_root" in workflow_config:
-                    dynamic_root = workflow_config["workspace_root"]
-                    self.workspace_root = dynamic_root
-                    self.dispatcher.workspace_root = dynamic_root
-                    
-                    # CRITICAL: Re-anchor LanceDB to the new project directory for dev mode and local vector store usage
-                    from services.orchestrator.src.rag.vector_store import LocalVectorStore
-                    self.tool_registry.vector_store = LocalVectorStore(workspace_root=dynamic_root)
-                    
-                    # Also update the SearchManager since it holds a reference to the vector store
-                    self.tool_registry.search_manager.vector_store = self.tool_registry.vector_store
-
                 orch_cfg = workflow_config.get("orchestrator_config", {})
                 if "max_iterations" in orch_cfg:
                     self.state.max_iterations = orch_cfg["max_iterations"]
@@ -936,15 +968,10 @@ class Agent:
                 if "search" in orch_cfg:
                     self.search_config.update(orch_cfg["search"])
                 
-                # Strip forbidden tools
-                forbidden_tools = workflow_config.get("orchestrator_config", {}).get("forbidden_tools", [])
-                for tool in forbidden_tools:
-                    self.tool_registry.tools.pop(tool, None)
-
                 # Store the context engineering rules for the system prompt
                 self.state.workflow_context = workflow_config.get("context_engineering", {})
 
-                # 2. Execute Pre-Flight Actions
+                # 4. Execute Pre-Flight Actions
                 for action in workflow_config.get("pre_flight_actions", []):
                     tool = action.get("tool")
                     args = action.get("args", {})
@@ -956,9 +983,8 @@ class Agent:
                         obs = await self.dispatcher.execute_async(tool, args, auto_approve=True)
                     
                     self.state.history.append(Message(role=Role.TOOL, content=f"Pre-flight Observation: {obs}", name=tool))
-            logger.info(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
         else:
-            logger.info("[bold cyan]▶️ --- Resuming Agent Loop ---[/bold cyan]")
+            logger.info("[bold cyan]▶️ --- Resuming Agent Loop (No New Prompt) ---[/bold cyan]")
 
         my_run_id = self.state.run_id
 

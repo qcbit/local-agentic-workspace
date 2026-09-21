@@ -69,7 +69,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.command || data.type) {
                 case 'executeTask':
-                    await this._executeTask(data.goal, data.autoApprove ?? false);
+                    await this._executeTask(data.goal, data.autoApprove ?? false, data.messages || []);
                     break;
                 case 'stop_agent':
                     console.log("🛑 Received stop signal from UI. Routing to IPC...");
@@ -94,7 +94,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 /**
      * Executes an agent task via the IPC socket and returns the result to the UI.
      */
-    private async _executeTask(goal: string, autoApprove: boolean = false) {
+    private async _executeTask(goal: string, autoApprove: boolean = false, chatHistory: any[] = []) {
         if (!this._view) return;
 
         let cleanGoal = goal;
@@ -127,7 +127,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             const payload = {
                 goal: cleanGoal,
                 auto_approve: autoApprove,
-                workflow_config: workflowConfig // This now reliably contains the workspace_root
+                workflow_config: workflowConfig, // This now reliably contains the workspace_root
+                history: chatHistory
             };
             
             const result = await this._udsClient.request('execute_agent_task', payload);
