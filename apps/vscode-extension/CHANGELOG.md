@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.0...v0.10.1) (2026-09-21)
+
+
+### Bug Fixes
+
+* **chat:** provide chat history to agent ([a460d0d](https://github.com/qcbit/local-agentic-workspace/commit/a460d0d8444a188a2d1190ed56bda9ca042e7bbe))
+* **editor:** Code lens to show buttons ([e1b4b5d](https://github.com/qcbit/local-agentic-workspace/commit/e1b4b5d5a7c4f7a8a80f8bcb94d460cb64c4619d))
+
 ## [0.10.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.9.4...v0.10.0) (2026-09-19)
 
 
