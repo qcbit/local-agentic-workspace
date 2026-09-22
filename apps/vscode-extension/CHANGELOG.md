@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.1...v0.10.2) (2026-09-22)
+
+
+### Bug Fixes
+
+* **Editor:** Code Lens buttons now appear for each change ([b69a3b6](https://github.com/qcbit/local-agentic-workspace/commit/b69a3b670a0f4edef6574f42cf6c5526ae9ead5c))
+* **Editor:** Code Lens buttons now appear for each change ([ee7bbdc](https://github.com/qcbit/local-agentic-workspace/commit/ee7bbdc6e0975a7ed9ac589d85ef9adb6ac75715))
+
 ## [0.10.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.0...v0.10.1) (2026-09-21)
 
 
