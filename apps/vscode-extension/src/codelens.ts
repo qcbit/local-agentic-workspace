@@ -1,33 +1,37 @@
 import * as vscode from 'vscode';
 
 export class AgentApprovalCodeLensProvider implements vscode.CodeLensProvider {
-    // We use an EventEmitter to tell VS Code to refresh the CodeLenses 
-    // when a pending write request starts or stops.
     private _onDidChangeCodeLenses: vscode.EventEmitter<void> = new vscode.EventEmitter<void>();
     public readonly onDidChangeCodeLenses: vscode.Event<void> = this._onDidChangeCodeLenses.event;
 
-    private isPendingApproval: boolean = false;
-    private targetLine: number = 0; // Default to top of file
+    // Map target lines by URI to prevent state collisions between multiple files
+    private targetLines = new Map<string, number>();
 
-    // Accept the specific line where the first change occurs
-    public setPendingState(state: boolean, line: number = 0) {
-        this.isPendingApproval = state;
-        this.targetLine = line;
-        this._onDidChangeCodeLenses.fire(); // Trigger UI redraw
+    public setTargetLine(uri: vscode.Uri, line: number) {
+        this.targetLines.set(uri.toString(), line);
+        this._onDidChangeCodeLenses.fire(); 
+    }
+
+    public clearAll() {
+        this.targetLines.clear();
+        this._onDidChangeCodeLenses.fire();
     }
 
     public provideCodeLenses(
         document: vscode.TextDocument, 
         token: vscode.CancellationToken
-    ): vscode.CodeLens[] | Thenable<vscode.CodeLens[]> {
-        
-        // Only show the lenses if we are actually waiting for an approval
-        if (!this.isPendingApproval) {
+    ): vscode.CodeLens[] {
+        // IMPORTANT: Only return lenses if this specific URI is actively awaiting approval
+        if (!this.targetLines.has(document.uri.toString())) {
             return [];
         }
-
-        // Anchor to the dynamic target line instead of 0
-        const targetRange = new vscode.Range(this.targetLine, 0, this.targetLine, 0);
+        
+        const requestedLine = this.targetLines.get(document.uri.toString()) || 0;
+        
+        // Safely bind the target line to the document's actual line count
+        const safeLine = Math.max(0, Math.min(requestedLine, document.lineCount > 0 ? document.lineCount - 1 : 0));
+        
+        const targetRange = new vscode.Range(safeLine, 0, safeLine, 0);
 
         const approveLens = new vscode.CodeLens(targetRange, {
             title: "$(check) Accept Change",
