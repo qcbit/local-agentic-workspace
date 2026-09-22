@@ -45,6 +45,29 @@ export async function activate(context: vscode.ExtensionContext) {
     let command: string;
     let args: string[] = [];
 
+    // Force VS Code to render CodeLens in diff editors
+    const diffConfig = vscode.workspace.getConfiguration('diffEditor');
+    if (!diffConfig.get<boolean>('codeLens')) {
+        await diffConfig.update('codeLens', true, vscode.ConfigurationTarget.Global);
+    }
+
+    // 1. Instantiate Providers FIRST
+    const diffProvider = new AgenticDiffProvider();
+    context.subscriptions.push(
+        vscode.workspace.registerTextDocumentContentProvider(
+            AgenticDiffProvider.scheme, 
+            diffProvider
+        )
+    );
+
+    // 2. Add this CodeLens registration
+    context.subscriptions.push(
+        vscode.languages.registerCodeLensProvider(
+            { scheme: AgenticDiffProvider.scheme }, 
+            codeLensProvider
+        )
+    );
+
     // 3. Check if we are running via F5 (Debug Mode) or in production
     if (context.extensionMode === vscode.ExtensionMode.Development) {
         // 🐛 DEBUG MODE: Run the raw Python script directly!
@@ -89,7 +112,6 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(backendChannel);
 
     // 5. Dev Mode Check vs. Failsafe
-    // 5. Dev Mode Check vs. Failsafe
     if (context.extensionMode === vscode.ExtensionMode.Development) {
         // We are in F5 mode. Assume `make dev` is running!
         console.log('🛠️ Dev backend detected. Skipping binary spawn.');
@@ -107,7 +129,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 PYTHONIOENCODING: "utf-8", // 🎯 Forces UTF-8 for print() and logging
                 PYTHONUTF8: "1",           // 🎯 Forces UTF-8 for file operations
                 AGENTIC_WORKSPACE_ROOT: activeWorkspace,
-                PYTHONPATH: monorepoRoot
+                // PYTHONPATH: monorepoRoot
             }
         });
 
@@ -164,27 +186,11 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // 1. Instantiate Providers FIRST
-    const diffProvider = new AgenticDiffProvider();
-    context.subscriptions.push(
-        vscode.workspace.registerTextDocumentContentProvider(
-            AgenticDiffProvider.scheme, 
-            diffProvider
-        )
-    );
-
-    // Register CodeLens to the EXACT scheme used by your DiffProvider
-    context.subscriptions.push(
-        vscode.languages.registerCodeLensProvider(
-            { scheme: AgenticDiffProvider.scheme }, 
-            codeLensProvider
-        )
-    );
-
-    // 2. The Internal Command called by UdsClient
+    // The Internal Command called by UdsClient
     context.subscriptions.push(
         vscode.commands.registerCommand('agenticWorkspace.handleWriteRequest', async (filePath: string, newContent: string) => {
-            return new Promise((resolve) => {
+            // Add 'async' to the executor callback
+            return new Promise(async (resolve) => {
                 pendingWriteResolve = resolve;
 
                 const originalUri = vscode.Uri.file(filePath);
@@ -192,15 +198,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 let firstChangedLine = 0;
 
-                // 🎯 FIX: Create the file (and parent directories) if it doesn't exist
                 if (!fs.existsSync(filePath)) {
                     const dirPath = path.dirname(filePath);
                     if (!fs.existsSync(dirPath)) {
                         fs.mkdirSync(dirPath, { recursive: true });
                     }
-                    fs.writeFileSync(filePath, ''); // Create an empty placeholder file
+                    fs.writeFileSync(filePath, ''); 
                 } else {
-                    // 🎯 Calculate the first line of difference for existing files
                     const originalContent = fs.readFileSync(filePath, 'utf8');
                     const originalLines = originalContent.split(/\r?\n/);
                     const newLines = newContent.split(/\r?\n/);
@@ -213,7 +217,6 @@ export async function activate(context: vscode.ExtensionContext) {
                         firstChangedLine++;
                     }
                     
-                    // Failsafe: If the agent returned identical code, or if the file is massive, cap it
                     if (firstChangedLine >= newLines.length) {
                         firstChangedLine = 0; 
                     }
@@ -222,28 +225,25 @@ export async function activate(context: vscode.ExtensionContext) {
                 // Populate your existing virtual diff provider with the AI's content
                 diffProvider.updateContent(virtualUri, newContent);
 
-                // Tell the CodeLens provider to show the Accept/Reject buttons over the code
-                codeLensProvider.setPendingState(true);
+                // Set the exact line mapping in the CodeLens provider FIRST
+                codeLensProvider.setTargetLine(virtualUri, firstChangedLine);
 
-                // Open the diff view natively
+                // Open the diff view natively. When VS Code renders the virtualUri, 
+                // it will automatically query the provider and render the lenses.
                 vscode.commands.executeCommand(
                     'vscode.diff',
                     originalUri,
                     virtualUri,
                     `Agent Proposed Changes ↔ ${path.basename(filePath)}`,
-                    { preview: false, preserveFocus: false } // 🎯 Ensure the diff opens in a new tab and takes focus
-
+                    { preview: false, preserveFocus: false } 
                 );
-
-                // Re-trigger the event after the editor has mounted to eliminate race conditions
-                codeLensProvider.setPendingState(true, firstChangedLine);
             });
         })
     );
 
     // 3. The Commands triggered when the user clicks the CodeLens buttons
     context.subscriptions.push(vscode.commands.registerCommand('agenticWorkspace.approveWrite', async () => {
-        codeLensProvider.setPendingState(false);
+        codeLensProvider.clearAll();
         await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
         
         // Note: We don't need to write the file here in TS.
@@ -252,7 +252,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('agenticWorkspace.rejectWrite', async () => {
-        codeLensProvider.setPendingState(false);
+        codeLensProvider.clearAll();
         await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
         
         if (pendingWriteResolve) pendingWriteResolve({ status: 'denied' });
@@ -540,14 +540,6 @@ export async function activate(context: vscode.ExtensionContext) {
     // 6. Initialize the AST Provider
     const astProvider = new ASTProvider(context.extensionUri);
 
-    // Register CodeLens to the EXACT scheme used by your DiffProvider
-    context.subscriptions.push(
-        vscode.languages.registerCodeLensProvider(
-            { scheme: AgenticDiffProvider.scheme }, 
-            codeLensProvider
-        )
-    );
-
     // 8. Register the AST Test Command (from Task 2.2)
     const testAstCommand = vscode.commands.registerCommand('localAgentic.testAST', async () => {
         let editor = vscode.window.activeTextEditor;
@@ -596,8 +588,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
         diffProvider.updateContent(virtualUri, mockAiProposedText);
 
-        // Tell the CodeLens provider to show the buttons
-        codeLensProvider.setPendingState(true);
+        // Tell the CodeLens provider to show the buttons at the top of the file
+        codeLensProvider.setTargetLine(virtualUri, 0);
 
         await vscode.commands.executeCommand(
             'vscode.diff',
