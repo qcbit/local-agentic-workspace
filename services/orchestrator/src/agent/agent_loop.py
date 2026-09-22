@@ -406,9 +406,9 @@ class ToolDispatcher:
 
     async def _handle_apply_inline_diff_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
         import difflib
-        path = args.get("file_path", "")
-        search_string = args.get("search_string", "")
-        replace_string = args.get("replace_string", "")
+        path = args.get("file_path", args.get("path", args.get("file", "")))
+        search_string = args.get("search_string", args.get("search", args.get("original_string", "")))
+        replace_string = args.get("replace_string", args.get("replace", args.get("new_string", "")))
         
         if not path or not search_string:
             return "Error: file_path and search_string are required."
