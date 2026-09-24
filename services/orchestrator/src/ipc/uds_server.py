@@ -234,7 +234,11 @@ class JsonRpcUdsServer:
             if self.active_writer == writer:
                 self.active_writer = None
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except (ConnectionResetError, BrokenPipeError) as e:
+                logger.error(f"Error while waiting for writer to close: {e}")
+
             # 🎯: Immediately cancel all pending IPC requests if VS Code reloads/disconnects
             for req_id, future in self.pending_requests.items():
                 if not future.done():
