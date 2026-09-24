@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.3](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.2...v0.10.3) (2026-09-24)
+
+
+### Bug Fixes
+
+* **Settings:** resolve hang ([d187f15](https://github.com/qcbit/local-agentic-workspace/commit/d187f156fea3354a8d2bc1926d48b393bd8a8119))
+* **Settings:** resolve hang ([d21166d](https://github.com/qcbit/local-agentic-workspace/commit/d21166d0290fd8ee96edafb76054795f2ad237f4))
+
 ## [0.10.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.1...v0.10.2) (2026-09-22)
 
 
