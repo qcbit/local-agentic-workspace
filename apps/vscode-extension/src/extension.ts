@@ -326,7 +326,7 @@ export async function activate(context: vscode.ExtensionContext) {
         // Fetch models from the local Ollama API
         const fetchModels = (): Promise<string[]> => {
             return new Promise((resolve) => {
-                http.get('http://127.0.0.1:11434/api/tags', (res) => {
+                const req = http.get('http://127.0.0.1:11434/api/tags', (res) => {
                     let data = '';
                     res.on('data', chunk => data += chunk);
                     res.on('end', () => {
@@ -342,6 +342,12 @@ export async function activate(context: vscode.ExtensionContext) {
                 }).on('error', (e) => {
                     console.error('Failed to reach local LLM API', e);
                     resolve(['llama3:8b', 'qwen2.5-coder:7b']); // Fallback defaults
+                });
+
+                // Force a resolution if the daemon hangs
+                req.setTimeout(2000, () => {
+                    req.destroy();
+                    resolve(['llama3:8b', 'qwen2.5-coder:7b']);
                 });
             });
         };
@@ -369,6 +375,18 @@ export async function activate(context: vscode.ExtensionContext) {
                     configData = await udsClient.request('get_config', {});
                 } catch (error: any) {
                     console.error('Failed to fetch config from backend:', error);
+                }
+
+                // Fallback for missing or empty config
+                if (!configData || Object.keys(configData).length === 0 || !configData.profiles) {
+                    configData = {
+                        active_profile: 'home',
+                        profiles: {
+                            home: {
+                                llm: { model_name: 'llama3:8b', endpoint_url: 'http://127.0.0.1:11434/v1/chat/completions' }
+                            }
+                        }
+                    };
                 }
 
                 if (configData && configData.profiles) {
