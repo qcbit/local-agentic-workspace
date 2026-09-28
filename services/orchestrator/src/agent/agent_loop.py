@@ -261,6 +261,11 @@ class ToolDispatcher:
 
         # TIER 1: Read-only actions (Auto-Approve)
         if action == "read":
+            # Security Sandbox
+            forbidden_files = [".env", ".agentic_config.json", "secrets.json"]
+            if any(f in path for f in forbidden_files):
+                return "❌ Security Sandbox Violation: Access to configuration and environment files is strictly prohibited."
+
             if os.path.isdir(path):
                 files = os.listdir(path)
                 return f"Directory listing for '{path}': {json.dumps(files)}"

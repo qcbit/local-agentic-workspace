@@ -29,6 +29,7 @@ let udsClient: UdsClient;
 let proxyServer: WarpProxyServer;
 let statusBarItem: vscode.StatusBarItem;
 let backendProcess: ChildProcess | undefined;
+let settingsPanel: vscode.WebviewPanel | undefined; // Singleton
 const codeLensProvider = new AgentApprovalCodeLensProvider();
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -45,10 +46,14 @@ export async function activate(context: vscode.ExtensionContext) {
     let command: string;
     let args: string[] = [];
 
-    // Force VS Code to render CodeLens in diff editors
+    // Force VS Code to render CodeLens in diff editors (Non-blocking)
     const diffConfig = vscode.workspace.getConfiguration('diffEditor');
     if (!diffConfig.get<boolean>('codeLens')) {
-        await diffConfig.update('codeLens', true, vscode.ConfigurationTarget.Global);
+        diffConfig.update('codeLens', true, vscode.ConfigurationTarget.Global)
+            .then(
+                () => console.log('CodeLens globally enabled for diffs.'),
+                (err: any) => console.error('Failed to update CodeLens setting:', err)
+            );
     }
 
     // 1. Instantiate Providers FIRST
@@ -110,6 +115,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const backendChannel = vscode.window.createOutputChannel('Local Agentic Backend');
     context.subscriptions.push(backendChannel);
+    backendChannel.show(true);
 
     // 5. Dev Mode Check vs. Failsafe
     if (context.extensionMode === vscode.ExtensionMode.Development) {
@@ -154,22 +160,23 @@ export async function activate(context: vscode.ExtensionContext) {
         });
     }
 
-    console.log('Local Agentic Workspace extension is now active.');
-
     // NOW that the process is booting up, connect the IPC client
     udsClient = new UdsClient(orchestratorPort);
     
-    // (You will want a slight delay or retry-loop here so the binary has 
-    // time to boot up and create the socket file before UdsClient connects)
-    // 1. Initialize and connect the IPC Client
-    connectWithRetry(udsClient)
-        .then(() => {
-            // Trigger background initial indexing on project load
-            indexWorkspaceOnLoad(udsClient);
-        })
-        .catch(err => {
-            vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
-        });
+    // 🎯 FIX: Defer the heavy connection and workspace scan by 3 seconds
+    // This gives the VS Code debugger plenty of time to attach cleanly.
+    setTimeout(() => {
+        connectWithRetry(udsClient)
+            .then(() => {
+                // Trigger background initial indexing on project load
+                indexWorkspaceOnLoad(udsClient);
+            })
+            .catch(err => {
+                vscode.window.showErrorMessage(`Failed to connect to orchestrator: ${err.message}`);
+            });
+    }, 3000);
+
+    console.log('Local Agentic Workspace extension is now active.');
 
     // We store the resolver here temporarily while the diff is open waiting for the user
     let pendingWriteResolve: ((value: { status: string }) => void) | null = null;
@@ -304,13 +311,20 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Watch config.json for changes so the status bar updates automatically
     const configWatcher = vscode.workspace.createFileSystemWatcher('**/.agentic_config.json');
-    configWatcher.onDidChange(() => updateStatusBar());
-    configWatcher.onDidCreate(() => updateStatusBar());
+    configWatcher.onDidChange(() => syncConfigState());
+    configWatcher.onDidCreate(() => syncConfigState());
     context.subscriptions.push(configWatcher);
 
     // 4. Register the Settings UI Command
     let disposableSettings = vscode.commands.registerCommand('localAgenticWorkspace.showSettings', async () => {
-        const panel = vscode.window.createWebviewPanel(
+        // Reveal if it already exists
+        if (settingsPanel) {
+            settingsPanel.reveal(vscode.ViewColumn.One);
+            return;
+        }
+
+        // Create it if it doesn't exist
+        settingsPanel = vscode.window.createWebviewPanel(
             'agentSettings',
             'Agentic Workspace Settings',
             vscode.ViewColumn.One,
@@ -320,8 +334,13 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         );
 
+        // Clean up the reference when the user closes the tab
+        settingsPanel.onDidDispose(() => {
+            settingsPanel = undefined;
+        });
+
         const scriptPathOnDisk = vscode.Uri.file(path.join(context.extensionPath, 'out', 'webview.js'));
-        const scriptUri = panel.webview.asWebviewUri(scriptPathOnDisk);
+        const scriptUri = settingsPanel.webview.asWebviewUri(scriptPathOnDisk);
 
         // Fetch models from the local Ollama API
         const fetchModels = (): Promise<string[]> => {
@@ -352,7 +371,7 @@ export async function activate(context: vscode.ExtensionContext) {
             });
         };
 
-        panel.webview.html = `
+        settingsPanel.webview.html = `
             <!DOCTYPE html>
             <html lang="en">
             <head>
@@ -367,7 +386,7 @@ export async function activate(context: vscode.ExtensionContext) {
             </html>
         `;
 
-        panel.webview.onDidReceiveMessage(async (message) => {
+        settingsPanel.webview.onDidReceiveMessage(async (message) => {
             if (message.command === 'ready') {
                 const availableModels = await fetchModels();
                 let configData = null;
@@ -399,7 +418,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 // 🎯 Send everything in a unified initialization payload to prevent hanging
-                panel.webview.postMessage({ 
+                settingsPanel?.webview.postMessage({ 
                     command: 'loadInitialData', 
                     models: availableModels,
                     specs: modelSpecs,
@@ -409,7 +428,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 const tavilyKey = await context.secrets.get('tavily_api_key');
                 const braveKey = await context.secrets.get('brave_api_key');
 
-                panel.webview.postMessage({
+                settingsPanel?.webview.postMessage({
                     command: 'loadSecrets',
                     secrets: {
                         tavily: tavilyKey ? '••••••••••••••••' : '',
@@ -457,9 +476,9 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                     
                     // Send the fully-qualified deployment names back to the React UI
-                    panel.webview.postMessage({ command: 'loadModels', models: models });
+                    settingsPanel?.webview.postMessage({ command: 'loadModels', models: models });
                 } catch (error: any) {
-                    panel.webview.postMessage({ 
+                    settingsPanel?.webview.postMessage({ 
                         command: 'agentError', 
                         text: `Failed to scan directory: ${error.message}` 
                     });
@@ -475,7 +494,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     // Small delay to ensure disk write consistency before refreshing
                     await new Promise(resolve => setTimeout(resolve, 100));
                     const freshConfig = await udsClient.request('get_config', {});
-                    panel.webview.postMessage({ command: 'loadConfig', config: freshConfig });
+                    settingsPanel?.webview.postMessage({ command: 'loadConfig', config: freshConfig });
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Failed to create profile: ${error.message}`);
                 }
@@ -486,7 +505,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     
                     await new Promise(resolve => setTimeout(resolve, 100));
                     const freshConfig = await udsClient.request('get_config', {});
-                    panel.webview.postMessage({ command: 'loadConfig', config: freshConfig });
+                    settingsPanel?.webview.postMessage({ command: 'loadConfig', config: freshConfig });
                 } catch (error: any) {
                     vscode.window.showErrorMessage(`Failed to delete profile: ${error.message}`);
                 }
@@ -734,21 +753,40 @@ export function deactivate() {
     }
 }
 
-async function connectWithRetry(client: UdsClient, retries = 20, delayMs = 500): Promise<void> {
+async function connectWithRetry(client: UdsClient, retries =110, delayMs = 200): Promise<void> {
     for (let i = 0; i < retries; i++) {
         try {
             await client.connect();
-            console.log('✅ Successfully connected to UDS socket.');
             return; 
         } catch (err: any) {
-            // If the file doesn't exist yet, or the connection is refused, wait and try again
             if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') {
-                console.log(`Socket not ready yet, retrying in ${delayMs}ms... (${i + 1}/${retries})`);
                 await new Promise(resolve => setTimeout(resolve, delayMs));
             } else {
-                throw err; // A real error occurred
+                throw err;
             }
         }
     }
     throw new Error("Timeout waiting for Python orchestrator to initialize the socket.");
+}
+
+function syncConfigState() {
+    // 1. Always update the status bar 
+    updateStatusBar();
+
+    // 2. If the Settings tab is open, push the new disk state to the React UI
+    if (settingsPanel) {
+        try {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (workspaceFolders) {
+                const configPath = path.join(workspaceFolders[0].uri.fsPath, '.agentic_config.json');
+                if (fs.existsSync(configPath)) {
+                    const configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                    // React is already listening for 'loadConfig' in SettingsPanel.tsx
+                    settingsPanel.webview.postMessage({ command: 'loadConfig', config: configData });
+                }
+            }
+        } catch (err) {
+            console.error('Failed to sync config to active panel:', err);
+        }
+    }
 }
