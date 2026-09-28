@@ -72,6 +72,7 @@ build-backend:
 	@pyinstaller uds_server-macos-arm64.spec --clean
 	@mkdir -p apps/vscode-extension/bin
 	@cp dist/uds_server-macos-arm64 apps/vscode-extension/bin/uds_server-macos-arm64
+	@chmod +x apps/vscode-extension/bin/uds_server-macos-arm64
 
 package: build-frontend build-backend
 	@echo "Packaging the VS Code extension..."

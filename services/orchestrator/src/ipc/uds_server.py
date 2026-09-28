@@ -64,6 +64,7 @@ for path in (src_dir, workspace_root):
 # until the internal sys.path.insert logic executes.
 from rag.vector_store import LocalVectorStore
 from services.orchestrator.src.agent.agent_loop import Agent, UniversalLLMProvider, Message, Role
+from services.orchestrator.src.logging.log_filter import scrub_secrets_from_string, SecretRedactingFilter
 
 # 🎯 Write logs to both the VS Code output panel AND a persistent file
 log_file = os.path.expanduser("~/.agentic_backend.log")
@@ -77,6 +78,10 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+logger.addFilter(SecretRedactingFilter())
+# Apply the filter globally to all outputs (terminal and file)
+for handler in logger.handlers:
+    handler.addFilter(SecretRedactingFilter())
 config_path = os.path.join(workspace_root, '.agentic_config.json')
 
 def load_config():
@@ -249,6 +254,8 @@ class JsonRpcUdsServer:
         """Processes the request in the background and writes the response."""
         try:
             response = await self.process_request(payload)
+            raw_json = json.dumps(response)
+            safe_json = scrub_secrets_from_string(raw_json)
             writer.write((json.dumps(response) + '\n').encode('utf-8'))
             await writer.drain()
         except Exception as e:
@@ -590,6 +597,8 @@ class JsonRpcUdsServer:
             "params": params
         }
         try:
+            raw_json = json.dumps(payload)
+            safe_json = scrub_secrets_from_string(raw_json)
             self.active_writer.write((json.dumps(payload) + '\n').encode('utf-8'))
             await self.active_writer.drain()
         except Exception as e:
@@ -608,17 +617,12 @@ def sanitize_ipc_payload(payload: dict) -> dict:
             for key, value in node.items():
                 k_lower = str(key).lower()
                 
-                # 1. Redact Secrets (Exact matches or known JSON-RPC return values)
-                if k_lower in ["value", "api_key", "tavily_api_key", "brave_api_key", "key"] and isinstance(value, str):
-                    if value.startswith("tvly-") or value.startswith("BSA") or len(value) > 15:
-                        node[key] = f"{value[:5]}...[REDACTED]"
-                
-                # 2. Truncate Massive Context (Files, Terminal Output, Code)
-                elif k_lower in ["content", "output", "code", "file_content"] and isinstance(value, str):
+                # 1. Truncate Massive Context (Files, Terminal Output, Code)
+                if k_lower in ["content", "output", "code", "file_content"] and isinstance(value, str):
                     if len(value) > 300:
                         node[key] = f"{value[:300]}\n... [TRUNCATED {len(value) - 300} chars for logs] ..."
                 
-                # 3. Recurse deeper
+                # 2. Recurse deeper
                 else:
                     _clean_node(value)
                     

@@ -2,15 +2,14 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run Local Agent Extension",
+      "name": "Launch Agent Extension",
       "type": "extensionHost",
       "request": "launch",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}/apps/vscode-extension"
+        "--extensionDevelopmentPath=${workspaceFolder}/apps/vscode-extension",
+        "--disable-extensions"
       ],
-      "outFiles": [
-        "${workspaceFolder}/apps/vscode-extension/out/**/*.js"
-      ]
+      "trace": true
     }
   ]
 }
