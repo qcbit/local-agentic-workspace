@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.4](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.3...v0.10.4) (2026-09-28)
+
+
+### Bug Fixes
+
+* **UX:** Sync config state. ([ea5388c](https://github.com/qcbit/local-agentic-workspace/commit/ea5388cf90fb79932edbb17c082862da8b34c4a6))
+* **UX:** Sync config state. ([0367b38](https://github.com/qcbit/local-agentic-workspace/commit/0367b38fbaea3fed2a7f055c86297d2b80f16da5))
+
 ## [0.10.3](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.2...v0.10.3) (2026-09-24)
 
 
