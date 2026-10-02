@@ -6,6 +6,7 @@ import pyarrow as pa
 import requests
 import time
 from typing import List, Dict, Any, Optional
+from rag.semantic_chunker import SemanticChunker
 
 logger = logging.getLogger(__name__)
 
@@ -38,23 +39,9 @@ class LocalVectorStore:
         # We explicitly request the same model to preserve our 384-dimension schema
         self.embedder = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-    
-    def _chunk_text(self, text: str, chunk_size: int = 1200, chunk_overlap: int = 200) -> list[str]:
-        """Splits text into overlapping chunks to fit within LLM context limits."""
-        if not text:
-            return []
-        
-        chunks = []
-        start = 0
-        text_length = len(text)
-        
-        while start < text_length:
-            end = start + chunk_size
-            chunks.append(text[start:end])
-            # Step forward by chunk_size, minus the overlap to preserve context between chunks
-            start += chunk_size - chunk_overlap 
-            
-        return chunks
+        # 3. Initialize the Tree-sitter AST Chunker
+        logger.info("Initializing Semantic Chunker...")
+        self.chunker = SemanticChunker()
 
     def _initialize_table(self):
         """Creates the LanceDB table with a strict PyArrow schema if it doesn't exist."""
@@ -80,7 +67,7 @@ class LocalVectorStore:
     # Inside LocalVectorStore class in vector_store.py
     def upsert_file(self, file_path: str, file_hash: str, content: str):
         # 1. Split the massive file into bite-sized chunks
-        text_chunks = self._chunk_text(content)
+        text_chunks, chunk_type = self.chunker.chunk_file(file_path, content)
         
         if not text_chunks:
             return
@@ -91,7 +78,8 @@ class LocalVectorStore:
         for chunk in text_chunks:
             try:
                 # Generate the embedding for the specific chunk
-                vector = self._generate_embedding(chunk)
+                enriched_chunk = f"File: {file_path}\n\n{chunk}"
+                vector = self._generate_embedding(enriched_chunk)
                 
                 # Format the data explicitly to match your PyArrow schema
                 data_to_insert.append({
@@ -110,7 +98,7 @@ class LocalVectorStore:
                 # We use mode="append" assuming we want to add new chunks, 
                 # or you can use LanceDB's merge capabilities if you need to deduplicate.
                 self.table.add(data_to_insert) 
-                logger.info(f"✅ Indexed {len(data_to_insert)} chunks for {file_path}")
+                logger.info(f"✅ Indexed {len(data_to_insert)} {chunk_type} chunks for {file_path}")
             except Exception as e:
                 logger.error(f"Failed to insert into LanceDB: {e}")
 

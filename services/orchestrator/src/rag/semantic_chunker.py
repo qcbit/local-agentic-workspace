@@ -34,7 +34,7 @@ class SemanticChunker:
         
         # If the file type isn't supported by our Tree-sitter setup, fallback to naive chunking
         if ext not in self.parsers:
-            return self._naive_chunking(content)
+            return self._naive_chunking(content), "naive"
 
         try:
             parser = self.parsers[ext]
@@ -45,13 +45,13 @@ class SemanticChunker:
             
             # If the file had no functions/classes, wrap the whole file as a single chunk
             if not chunks and content.strip():
-                return [content.strip()]
+                return [content.strip()], "semantic (whole file)"
                 
-            return chunks
+            return chunks, "semantic"
             
         except Exception as e:
             logger.error(f"Tree-sitter failed to parse {file_path}: {e}")
-            return self._naive_chunking(content)
+            return self._naive_chunking(content), "naive (fallback)"
 
     def _extract_nodes(self, node, source_bytes: bytes, target_types: set) -> List[str]:
         """Recursively traverses the AST to extract target nodes as strings."""
