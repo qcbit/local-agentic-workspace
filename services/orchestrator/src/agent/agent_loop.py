@@ -288,6 +288,18 @@ class ToolDispatcher:
         elif action == "write":
             content = args.get("content", "")
 
+            # 🛡️ THE AST SANDBOX GUARDRAIL
+            if path.endswith(".py"):
+                try:
+                    ast.parse(content)
+                except SyntaxError as e:
+                    error_msg = f"❌ SyntaxError: {e.msg} at line {e.lineno}"
+                    if e.text:
+                        error_msg += f"\nCode snippet: {e.text.strip()}"
+                    return (f"Action Blocked by AST Sandbox: Your proposed changes "
+                            f"contain a syntax error and would corrupt the file.\n"
+                            f"{error_msg}\n\nPlease fix the syntax and try again.")
+
             # 🚀 AUTO-APPROVE BYPASS
             if auto_approve:
                 logger.info(f"⚡ [Auto-Approve] Silently writing to '{path}'...")
@@ -412,16 +424,13 @@ class ToolDispatcher:
     async def _handle_apply_inline_diff_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
         import difflib
         path = args.get("file_path", args.get("path", args.get("file", "")))
-        search_string = args.get("search_string", args.get("search", args.get("original_string", "")))
-        replace_string = args.get("replace_string", args.get("replace", args.get("new_string", "")))
+        start_line = args.get("start_line")
+        end_line = args.get("end_line")
+        replace_string = args.get("replace_string", args.get("replace", args.get("new_code", "")))
         
-        if not path or not search_string:
-            return "Error: file_path and search_string are required."
+        if not path or start_line is None or end_line is None:
+            return "Error: file_path, start_line, and end_line are required."
 
-        # Force surgical diffs by rejecting massive search blocks
-        if len(search_string) > 1000:
-            return "Error: search_string is too large. You must target a specific function or block of code (under 1000 characters), not the entire file or class."
-            
         # Sandbox Check
         abs_target = os.path.abspath(os.path.expanduser(path))
         abs_workspace = os.path.abspath(self.workspace_root)
@@ -434,18 +443,24 @@ class ToolDispatcher:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
             
-        count = content.count(search_string)
-        if count == 0:
-            return "Error: search_string not found in file. Ensure exact whitespace and indentation match."
-        if count > 1:
-            return f"Error: search_string found {count} times. Include more surrounding lines to make it unique."
+        lines = content.splitlines(keepends=True)
+        
+        # Validate boundaries
+        if start_line < 1 or end_line > len(lines) or start_line > end_line:
+            return f"Error: Invalid line ranges. File has {len(lines)} lines."
             
-        new_content = content.replace(search_string, replace_string)
+        # Perform the list slicing replacement
+        new_lines = lines[:start_line - 1] + [replace_string]
+        if not replace_string.endswith('\n'):
+            new_lines.append('\n')
+        new_lines.extend(lines[end_line:])
+        
+        new_content = "".join(new_lines)
         
         # Generate the programmatic diff
         diff_lines = list(difflib.unified_diff(
-            content.splitlines(keepends=True),
-            new_content.splitlines(keepends=True),
+            lines,
+            new_lines,
             fromfile=f"a/{os.path.basename(path)}",
             tofile=f"b/{os.path.basename(path)}",
             n=3
@@ -455,7 +470,7 @@ class ToolDispatcher:
         if diff_str:
             logger.info(f"📝 [Auto-Diff] Changes staged for {path}:\n{diff_str}")
         
-        # Route to the existing Tier 2 UI approval flow
+        # Route to the existing Tier 2 UI approval flow (which now triggers the AST check)
         return await self._handle_file_system_async({
             "action": "write",
             "path": abs_target,
@@ -626,15 +641,16 @@ class ToolRegistry:
             },
             "apply_inline_diff": {
                 "name": "apply_inline_diff",
-                "description": "Precisely replaces a specific string block in a file. Use this to surgically modify code without rewriting the entire file.",
+                "description": "Precisely replaces a specific block of lines in a file. Use this to surgically modify code by specifying the exact start and end lines of the function or block you are replacing.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "file_path": { "type": "string", "description": "Target file path." },
-                        "search_string": { "type": "string", "description": "The EXACT string block to be replaced. Must include exact original indentation and whitespace." },
-                        "replace_string": { "type": "string", "description": "The new string block to insert." }
+                        "start_line": { "type": "integer", "description": "The 1-indexed starting line number to replace (inclusive)." },
+                        "end_line": { "type": "integer", "description": "The 1-indexed ending line number to replace (inclusive)." },
+                        "replace_string": { "type": "string", "description": "The new code block to insert. Must include proper indentation." }
                     },
-                    "required": ["file_path", "search_string", "replace_string"]
+                    "required": ["file_path", "start_line", "end_line", "replace_string"]
                 }
             }
         }
