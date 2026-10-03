@@ -81,6 +81,7 @@ def execute_python_repl(code: str, timeout: int = 5) -> str:
             [python_bin, "-c", code],
             capture_output=True,
             text=True,
+            encoding='utf-8',
             timeout=timeout
         )
         
@@ -1034,6 +1035,7 @@ class Agent:
             Your output must be a single JSON object with EXACTLY these keys: "reasoning" (string), "tool" (string), and "tool_args" (dictionary). 
             
             STRICT DIRECTIVES (FAILURE TO COMPLY WILL ABORT THE TASK):
+            - PYTHON EDITING: If 'apply_inline_diff' repeatedly fails with AST SyntaxErrors due to whitespace or indentation issues, fall back to using 'file_system' with action 'write' to safely rewrite the ENTIRE file.
             - YOUR CURRENT WORKING DIRECTORY IS: {self.workspace_root}
             - JSON FORMAT ONLY: You must not wrap your JSON in markdown code blocks (```json). Never use Python-style 'None'. Use strict JSON only.
             - TOOL ARGUMENTS: If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}. You MUST provide all required arguments for the tool you select.
