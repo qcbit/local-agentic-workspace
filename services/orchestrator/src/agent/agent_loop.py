@@ -1,968 +1,158 @@
-import ast
 import asyncio
-from dataclasses import dataclass, field
-from enum import Enum
 import json
 import logging
-import operator
 import os
-from pathlib import Path
 import re
-from services.orchestrator.src.agent.ast_parser import CodebaseASTParser
-from services.orchestrator.src.rag.search_manager import SearchManager
-from services.orchestrator.src.rag.vector_store import LocalVectorStore
-from services.orchestrator.src.memory.context_manager import SlidingContextManager
-import shlex
-import subprocess
-import sys
-import time
-import tree_sitter_python as tspython
-from tree_sitter import Language, Parser
-from typing import Any, AsyncGenerator, Dict, List, Optional
-import urllib.request
-import urllib.error
+from typing import Any, Dict, List, Optional
 import uuid
+
+from services.orchestrator.src.agent.state import AgentState, Message, Role
+from services.orchestrator.src.llm.provider import MockLLMProvider, UniversalLLMProvider
+from services.orchestrator.src.memory.context_manager import SlidingContextManager
+from services.orchestrator.src.tools.dispatcher import ToolDispatcher
+from services.orchestrator.src.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-def get_python_interpreter() -> str:
-    """Finds a valid Python interpreter, avoiding PyInstaller binary wrappers."""
-    # 1. If running standard python, sys.executable is safe
-    if not getattr(sys, 'frozen', False):
-        return sys.executable
-        
-    # 2. If running as a PyInstaller bundle, sys.executable points to the binary.
-    # We must search the host system for a real python interpreter.
-    possible_interpreters = []
-    
-    if os.name == 'nt': # Windows
-        possible_interpreters = ['python', 'python3', 'py']
-    else: # macOS / Linux
-        possible_interpreters = ['python3', '/usr/bin/python3', '/usr/local/bin/python3']
-        
-    for interp in possible_interpreters:
-        try:
-            # Verify the interpreter actually works
-            result = subprocess.run([interp, "--version"], capture_output=True, text=True, timeout=2)
-            if result.returncode == 0:
-                return interp
-        except Exception:
-            continue
-            
-    # Fallback default
-    return 'python3'
+__all__ = [
+    "Role",
+    "Message",
+    "AgentState",
+    "UniversalLLMProvider",
+    "MockLLMProvider",
+    "Agent",
+]
 
-def execute_python_repl(code: str, timeout: int = 5) -> str:
-    """Executes Python code in a sandboxed child process with a strict timeout."""
-    if not code:
-        return "Error: No code provided."
-
-    forbidden_modules = {"os", "sys", "subprocess", "shutil", "pty", "socket", "pathlib"}
-    
-    # 1. AST Sandbox Security Check
-    try:
-        tree = ast.parse(code)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name.split('.')[0] in forbidden_modules:
-                        return f"Error: Import of forbidden module '{alias.name}' is blocked by sandbox."
-            elif isinstance(node, ast.ImportFrom):
-                if node.module and node.module.split('.')[0] in forbidden_modules:
-                    return f"Error: Import from forbidden module '{node.module}' is blocked by sandbox."
-    except SyntaxError as e:
-        return f"SyntaxError in provided code: {e}"
-
-    # 2. Execution via Isolated Child Process using a real interpreter
-    python_bin = get_python_interpreter()
-
-    try:
-        result = subprocess.run(
-            [python_bin, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-        
-        output = result.stdout
-        if result.stderr:
-            output += f"\n--- STDERR ---\n{result.stderr}"
-            
-        return output.strip() if output.strip() else "Execution successful (no standard output). Did you forget to print()?"
-        
-    except subprocess.TimeoutExpired:
-        return f"Error: Execution timed out after {timeout} seconds. Infinite loop prevented."
-    except Exception as e:
-        return f"Error executing python code: {str(e)}"
-
-def validate_terminal_command(workspace_root: str, command_str: str) -> tuple[bool, str]:
-    """
-    Scans a shell command for path arguments that escape the workspace root.
-    """
-    try:
-        tokens = shlex.split(command_str)
-    except Exception:
-        return False, "Error: Invalid or unparseable shell command syntax."
-
-    safe_root = Path(workspace_root).resolve(strict=True)
-
-    for token in tokens:
-        if token.startswith("/") or token.startswith("~") or ".." in token:
-            expanded_token = os.path.expanduser(token)
-            resolved_path = Path(expanded_token).resolve()
-            
-            # Remove the exists() check! Block it if it points outside, period.
-            try:
-                resolved_path.relative_to(safe_root)
-            except ValueError:
-                return False, (
-                    f"Error: Command blocked by sandbox. "
-                    f"Target path '{token}' is outside authorized workspace root."
-                )
-
-    return True, ""
-
-# --- State Definitions ---
-
-class Role(str, Enum):
-    USER = "user"
-    ASSISTANT = "assistant"
-    SYSTEM = "system"
-    TOOL = "tool"
-
-@dataclass
-class Message:
-    role: Role
-    content: str
-    name: Optional[str] = None
-
-@dataclass
-class AgentState:
-    user_goal: str
-    history: List[Message] = field(default_factory=list)
-    is_complete: bool = False
-    is_canceled: bool = False
-    iterations: int = 0
-    max_iterations: int = 25
-    summary: str = ""  # to track the running summary 
-    run_id: str = "" # Unique execution token
-    workflow_context: Optional[Dict[str, Any]] = None  # Context engineering rules for the system prompt
-
-# --- Tool Dispatcher ---
-
-def is_path_safe(workspace_root: str, target_path: str) -> bool:
-    """Strictly sandboxes file paths to the workspace root."""
-    try:
-        safe_root = Path(workspace_root).resolve(strict=True)
-        target = Path(target_path).resolve()
-        
-        # Throws ValueError if target is outside safe_root
-        target.relative_to(safe_root)
-        return True
-    except (ValueError, RuntimeError):
-        return False
-
-def validate_python_syntax(code: str) -> str:
-    """Checks Python code for syntax errors using the ast module natively."""
-    import ast
-    if not code:
-        return "Error: No code provided."
-    try:
-        ast.parse(code)
-        return "✅ Syntax Check Passed: The provided Python code is syntactically valid."
-    except SyntaxError as e:
-        # Provide detailed error traceback to help the model self-correct
-        error_msg = f"❌ SyntaxError: {e.msg} at line {e.lineno}"
-        if e.text:
-            error_msg += f"\nCode snippet: {e.text.strip()}"
-        return error_msg
-    except Exception as e:
-        return f"❌ Validation Error: {str(e)}"
-
-class ToolDispatcher:
-    """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
-    
-    def __init__(
-        self,
-        uds_server=None,
-        workspace_root: Optional[str] = None,
-        permission_callback=None,
-        sandbox_config: Optional[Dict[str, Any]] = None,
-        max_file_read_chars: int = 4000,
-    ):
-        self.uds_server = uds_server
-        # Default to current directory if not provided
-        self.workspace_root = workspace_root or os.getcwd()
-        self.permission_callback = permission_callback  # Store the UI callback
-        self.sandbox_config = sandbox_config or {}
-        self.max_file_read_chars = max_file_read_chars
-        # Strict deny-list for highly destructive or interactive commands
-        self.shell_deny_list = [
-            "rm", "sudo", "mkfs", "fdisk", "dd", "chown", "chmod", 
-            "shutdown", "reboot", "ufw", "iptables", "firewall-cmd", 
-            "nano", "vim", "top", "history"
-        ]
-
-    async def execute_async(self, tool_name: str, arguments: Dict[str, Any], auto_approve: bool = False) -> str:
-        logger.info(f"🔧 [Tool Call] Dispatching '{tool_name}' with args: {arguments} (Auto-Approve: {auto_approve})")
-        
-        try:
-            if tool_name == "file_system":
-                return await self._handle_file_system_async(arguments, auto_approve=auto_approve)
-            elif tool_name == "terminal_proxy":
-                return await self._handle_terminal_proxy_async(arguments, auto_approve=auto_approve)
-            elif tool_name == "python_repl":
-                return execute_python_repl(arguments.get("code", ""))
-            elif tool_name == "validate_python_syntax":
-                return validate_python_syntax(arguments.get("code", ""))
-            elif tool_name == "finish_task":
-                return "Task marked as complete by the agent."
-            elif tool_name == "apply_inline_diff":
-                return await self._handle_apply_inline_diff_async(arguments, auto_approve=auto_approve)
-            else:
-                return f"Error: Tool '{tool_name}' not recognized."
-        except Exception as e:
-            return f"Error executing {tool_name}: {str(e)}"
-
-    async def _handle_file_system_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
-        action = args.get("action")
-        path = args.get("path", ".")
-        
-        # 1. Anchor relative paths strictly to the VS Code workspace root
-        expanded_path = os.path.expanduser(path)
-        if not os.path.isabs(expanded_path):
-            expanded_path = os.path.join(self.workspace_root, expanded_path)
-            
-        abs_target = os.path.abspath(expanded_path)
-        abs_workspace = os.path.abspath(self.workspace_root)
-
-        # 🛡️ 🎯 NEW DYNAMIC SANDBOX ENFORCEMENT
-        is_authorized = False
-        if not self.sandbox_config.get("strict_mode", True):
-            is_authorized = True
-        else:
-            # Check primary workspace
-            if os.path.commonpath([abs_target, abs_workspace]) == abs_workspace:
-                is_authorized = True
-            else:
-                # Check authorized external paths
-                for allowed_dir in self.sandbox_config.get("allowed_external_paths", []):
-                    abs_allowed = os.path.abspath(os.path.expanduser(allowed_dir))
-                    if os.path.commonpath([abs_target, abs_allowed]) == abs_allowed:
-                        is_authorized = True
-                        break
-
-        if not is_authorized:
-            return f"error: command blocked by sandbox. Path '{path}' is outside authorized workspace root and not in allowed_external_paths."
-
-        # 3. CRITICAL: Override the local path variable with the fully resolved absolute path
-        # so subsequent os.listdir() or open() calls don't read the daemon's CWD.
-        path = abs_target
-
-        # TIER 1: Read-only actions (Auto-Approve)
-        if action == "read":
-            # Security Sandbox
-            forbidden_files = [".env", ".agentic_config.json", "secrets.json"]
-            if any(f in path for f in forbidden_files):
-                return "❌ Security Sandbox Violation: Access to configuration and environment files is strictly prohibited."
-
-            if os.path.isdir(path):
-                files = os.listdir(path)
-                return f"Directory listing for '{path}': {json.dumps(files)}"
-            elif os.path.isfile(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                # --- Protect the Context Window ---
-                if len(content) > self.max_file_read_chars:
-                    return (
-                        f"File content of '{path}' (TRUNCATED - File is too large):\n"
-                        f"{content[:self.max_file_read_chars]}\n\n"
-                        f"...[TRUNCATED]... The file is too large to read entirely. "
-                        f"You MUST use the 'search_codebase' tool to query specific parts of this file."
-                    )    
-                return f"File content of '{path}':\n{content}"
-            else:
-                return f"Error: Path '{path}' does not exist."
-                
-        # TIER 2: File writes (Requires VS Code Staged Diff Approval)
-        elif action == "write":
-            content = args.get("content", "")
-
-            # 🚀 AUTO-APPROVE BYPASS
-            if auto_approve:
-                logger.info(f"⚡ [Auto-Approve] Silently writing to '{path}'...")
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                return f"Successfully wrote to file '{path}'."
-            
-            if not self.uds_server:
-                return "Error: Cannot request write permission. IPC Server not attached."
-                
-            logger.info(f"⏸️  [Proxy] Requesting write permission for '{path}'...")
-            # Suspend and ask VS Code for permission
-            response = await self.uds_server.request_client_context("request_write_permission", {
-                "path": path,
-                "content": content
-            })
-            
-            if "content" in response and "timed out" in response["content"]:
-                return response["content"]
-            
-            if response.get("status") == "approved":
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                return f"Successfully wrote to file '{path}'."
-            else:
-                return f"Action Blocked: The user denied the file write request for '{path}'."
-        
-        return f"Error: Unsupported file system action '{action}'."
-
-    async def _handle_terminal_proxy_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
-        command = args.get("command")
-        if not command:
-            return "Error: No command provided."
-            
-        # 🛡️ 1. SANDBOX CHECK (Always runs)
-        is_safe, error_msg = validate_terminal_command(self.workspace_root, command)
-        if not is_safe:
-            logger.warning(f"🔒 [Sandbox Blocked] Command: '{command}'")
-            return error_msg
-
-        # 🛡️ 2. DENY-LIST CHECK (Always runs)
-        command_lower = command.lower()
-        if any(forbidden in command_lower.split() for forbidden in self.shell_deny_list):
-             return f"SECURITY VIOLATION: Command execution blocked. '{command}' contains forbidden keywords."
-            
-        # 🚀 AUTO-APPROVE BYPASS
-        if auto_approve:
-            logger.info(f"⚡ [Auto-Approve] Silently executing '{command}'...")
-            user_timeout = 30 # Default to 30 seconds when silently auto-approving
-            
-            try:
-                process = await asyncio.create_subprocess_shell(
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=self.workspace_root
-                )
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=user_timeout)
-                stdout_str = stdout.decode('utf-8')
-                stderr_str = stderr.decode('utf-8')
-                output = stdout_str if process.returncode == 0 else stderr_str
-                return f"Command exit code {process.returncode}.\nOutput:\n{output}"
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                return f"Error: Command execution timed out after {user_timeout} seconds."
-
-        # TIER 3: Shell commands (Requires Explicit Modal Confirmation)
-        if self.permission_callback:
-            logger.info(f"⏸️  [Proxy] Requesting TUI permission for '{command}'...")
-            is_approved = await self.permission_callback(f"Allow shell execution:\n\n{command}")
-            
-            if is_approved:
-                # TUI fallback does not support dynamic timeouts yet, fallback to standard subprocess
-                result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=self.workspace_root)
-                output = result.stdout if result.returncode == 0 else result.stderr
-                return f"Command exit code {result.returncode}.\nOutput:\n{output}"
-            else:
-                return "Action Blocked: The user denied the shell execution request."
-
-        if not self.uds_server:
-            return "Error: Cannot request shell permission. IPC Server not attached."
-            
-        logger.info(f"⏸️  [Proxy] Requesting shell execution permission for '{command}'...")
-        response = await self.uds_server.request_client_context("request_shell_permission", {
-            "command": command
-        })
-        
-        if "content" in response and "timed out" in response["content"]:
-            return response["content"]
-        
-        if response.get("status") == "approved":
-            # 🎯 Extract custom timeout, fallback to 30s
-            try:
-                user_timeout = int(response.get("timeout", 30))
-            except (ValueError, TypeError):
-                user_timeout = 30
-                
-            try:
-                process = await asyncio.create_subprocess_shell(
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=self.workspace_root
-                )
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=user_timeout)
-                stdout_str = stdout.decode('utf-8')
-                stderr_str = stderr.decode('utf-8')
-                output = stdout_str if process.returncode == 0 else stderr_str
-                return f"Command exit code {process.returncode}.\nOutput:\n{output}"
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                return f"Error: Command execution timed out after {user_timeout} seconds."
-        else:
-            return "Action Blocked: The user denied the shell execution request."
-
-    async def _handle_apply_inline_diff_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
-        import difflib
-        path = args.get("file_path", args.get("path", args.get("file", "")))
-        search_string = args.get("search_string", args.get("search", args.get("original_string", "")))
-        replace_string = args.get("replace_string", args.get("replace", args.get("new_string", "")))
-        
-        if not path or not search_string:
-            return "Error: file_path and search_string are required."
-
-        # Force surgical diffs by rejecting massive search blocks
-        if len(search_string) > 1000:
-            return "Error: search_string is too large. You must target a specific function or block of code (under 1000 characters), not the entire file or class."
-            
-        # Sandbox Check
-        abs_target = os.path.abspath(os.path.expanduser(path))
-        abs_workspace = os.path.abspath(self.workspace_root)
-        if self.sandbox_config.get("strict_mode", True) and not abs_target.startswith(abs_workspace):
-            return f"Error: Path '{path}' is outside authorized workspace root."
-            
-        if not os.path.isfile(path):
-            return f"Error: File '{path}' does not exist."
-            
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-            
-        count = content.count(search_string)
-        if count == 0:
-            return "Error: search_string not found in file. Ensure exact whitespace and indentation match."
-        if count > 1:
-            return f"Error: search_string found {count} times. Include more surrounding lines to make it unique."
-            
-        new_content = content.replace(search_string, replace_string)
-        
-        # Generate the programmatic diff
-        diff_lines = list(difflib.unified_diff(
-            content.splitlines(keepends=True),
-            new_content.splitlines(keepends=True),
-            fromfile=f"a/{os.path.basename(path)}",
-            tofile=f"b/{os.path.basename(path)}",
-            n=3
-        ))
-        
-        diff_str = "".join(diff_lines)
-        if diff_str:
-            logger.info(f"📝 [Auto-Diff] Changes staged for {path}:\n{diff_str}")
-        
-        # Route to the existing Tier 2 UI approval flow
-        return await self._handle_file_system_async({
-            "action": "write",
-            "path": abs_target,
-            "content": new_content
-        }, auto_approve=auto_approve)
-
-# --- Tool Registry ---
-
-class ToolRegistry:
-    def __init__(self, uds_server=None):
-        # We pass in a reference to the UDS Server so the ToolRegistry can
-        # trigger the reverse-request over the socket to VS Code.
-        self.uds_server = uds_server
-        self.vector_store = LocalVectorStore() 
-        self.search_manager = SearchManager(uds_server=uds_server, vector_store=self.vector_store)
-        
-        self.tools = {
-            "get_symbol_references": {
-                "name": "get_symbol_references",
-                "description": "Asks the IDE for all cross-file references of a symbol. Returns a list of file URIs and line numbers.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "symbol": { "type": "string", "description": "The name of the class, function, or variable." },
-                        "file_path": { "type": "string", "description": "Absolute path to the active file." },
-                        "line": { "type": "integer", "description": "The 1-indexed line number shown in the editor." },
-                        "character": { "type": "integer", "description": "The 0-indexed character column position." }
-                    },
-                    "required": ["symbol", "file_path", "line", "character"]
-                }
-            },
-            "extract_code_structure": {
-                "name": "extract_code_structure",
-                "description": "Extracts the exact class or function definition from a file at a specific line number using Tree-sitter AST parsing. Use this to read code without loading massive files.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string", "description": "Absolute path to the file." },
-                        "line_number": { "type": "integer", "description": "0-indexed line number." }
-                    },
-                    "required": ["file_path", "line_number"]
-                }
-            },
-            "terminal_proxy": {
-                "name": "terminal_proxy",
-                "description": "Executes a shell command. Use this for running tests, compiling, or executing scripts.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "The bash command to execute." }
-                    },
-                    "required": ["command"]
-                }
-            },
-            "file_system": {
-                "name": "file_system",
-                "description": "Reads or writes files to the local disk.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "description": "Either 'read' or 'write'." },
-                        "path": { "type": "string", "description": "The target file path." },
-                        "content": { "type": "string", "description": "The string to write (required if action is 'write')." }
-                    },
-                    "required": ["action", "path"]
-                }
-            },
-            "finish_task": {
-                "name": "finish_task",
-                "description": "Marks the agent loop as complete. ALWAYS call this when your goal is achieved.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "summary": { "type": "string", "description": "The comprehensive final answer or requested information." }
-                    },
-                    "required": ["summary"]
-                }
-            },
-            "web_search": {
-                "name": "web_search",
-                "description": "Searches the live web for technical documentation, API specs, errors, or current information. Triggers a tiered fallback: Tavily -> Brave -> SearxNG.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The dense search query string."
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            "vscode_command": {
-                "name": "vscode_command",
-                "description": "Executes a native VS Code command. Use 'vscode.openFolder' to open a directory workspace, or 'vscode.open' to open a specific file in the editor.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The VS Code command ID (e.g., 'vscode.openFolder' or 'vscode.open')"
-                        },
-                        "target_path": {
-                            "type": "string",
-                            "description": "The absolute path to the file or folder"
-                        }
-                    },
-                    "required": ["command", "target_path"]
-                }
-            },
-            "validate_python_syntax": {
-                "name": "validate_python_syntax",
-                "description": "Natively validates Python code for syntax errors without executing it. ALWAYS use this to verify refactored code strings before writing them to the file system.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "The complete Python code to validate."
-                        }
-                    },
-                    "required": ["code"]
-                }
-            },
-            "python_repl": {
-                "name": "python_repl",
-                "description": "A sandboxed Python environment. Use this to execute Python code for mathematical calculations, data formatting, and complex logic. You MUST use print() to output results so they can be read.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "The Python script to execute."
-                        }
-                    },
-                    "required": ["code"]
-                }
-            },
-            "search_codebase": {
-                "name": "search_codebase",
-                "description": "Searches the local codebase using semantic vector embeddings. Use this when you need to find where a function, class, or variable is defined, or to understand how a specific part of the local project works.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The semantic search query"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            "get_active_file_content": {
-                "name": "get_active_file_content",
-                "description": "Retrieves the full source code text currently visible in the user's active VS Code editor window.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {}
-                }
-            },
-            "get_selected_text": {
-                "name": "get_selected_text",
-                "description": "Retrieves the specific string of text the user currently has highlighted/selected in VS Code.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {}
-                }
-            },
-            "apply_inline_diff": {
-                "name": "apply_inline_diff",
-                "description": "Precisely replaces a specific string block in a file. Use this to surgically modify code without rewriting the entire file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string", "description": "Target file path." },
-                        "search_string": { "type": "string", "description": "The EXACT string block to be replaced. Must include exact original indentation and whitespace." },
-                        "replace_string": { "type": "string", "description": "The new string block to insert." }
-                    },
-                    "required": ["file_path", "search_string", "replace_string"]
-                }
-            }
-        }
-
-        if self.uds_server is None:
-            # Strip out VS Code tools if running in the standalone TUI
-            for tool_name in ["get_active_file_content", "apply_inline_diff"]:
-                self.tools.pop(tool_name, None)
-
-            logger.info("🖥️ [TUI Mode] VS Code specific tools disabled.")
-
-    async def execute_tool_async(self, tool_name: str, arguments: dict) -> Optional[str]:
-        try:
-            if tool_name == "search_codebase":
-                query = arguments.get("query")
-                if not isinstance(query, str) or not query.strip():
-                    return "Error: search query must be a non-empty string."
-
-                results = self.vector_store.semantic_search(query, limit=3)
-                if not results:
-                    return "No relevant codebase results found."
-                
-                formatted_response = "Codebase Search Results:\n\n"
-                for i, res in enumerate(results):
-                    formatted_response += f"--- Result {i+1} (File: {res.get('file_path')}) ---\n"
-                    formatted_response += f"{res.get('content')}\n\n"
-                return formatted_response
-
-            elif tool_name == "vscode_command":
-                if not self.uds_server:
-                    return "Error: IPC Server not attached to ToolRegistry."
-                
-                # Forward the command request to VS Code
-                response = await self.uds_server.request_client_context(tool_name, arguments)
-                return response.get("content", "Error: No confirmation received from VS Code.")
-
-            elif tool_name == "web_search":
-                query = arguments.get("query")
-                if not query or not isinstance(query, str):
-                    return "Error: A non-empty 'query' string is required for web_search."
-                
-                # Retrieve dynamic character budget if accessible, or default to 4000
-                max_chars = arguments.get("max_chars", 4000)
-                run_id = arguments.get("run_id", "default_run")
-                search_config = arguments.get("search_config", {})
-                
-                return await self.search_manager.execute_search(
-                    query=query,
-                    run_id=run_id,
-                    search_config=search_config,
-                    max_chars=max_chars
-                )
-
-            elif tool_name in ["get_active_file_content", "get_selected_text"]:
-                if not self.uds_server:
-                    return "Error: IPC Server not attached to ToolRegistry."
-                
-                # This is where the magic happens! We pause the agent and 
-                # ask the UDS server to request data FROM Node.js
-                response = await self.uds_server.request_client_context(tool_name)
-                return response.get("content", "Error: No content received from VS Code.")
-
-            elif tool_name == "python_repl":
-                return execute_python_repl(arguments.get("code", ""))
-
-            elif tool_name == "validate_python_syntax":
-                return validate_python_syntax(arguments.get("code", ""))
-
-            elif tool_name == "get_symbol_references":
-                if not self.uds_server:
-                    return "Error: IPC Server not attached to ToolRegistry."
-                
-                path_arg = arguments.get("file_path") or arguments.get("file_uri") or arguments.get("uri")
-                line_arg = arguments.get("line") or arguments.get("line_number") or 0
-                char_arg = arguments.get("character") or arguments.get("character_position") or arguments.get("char") or 0
-                symbol_arg = arguments.get("symbol")
-                
-                if not path_arg:
-                    return "Error: You must provide a valid 'file_path'."
-
-                if str(path_arg).startswith("file://"):
-                    path_arg = str(path_arg).replace("file://", "")
-
-                lsp_line = int(line_arg) - 1 if int(line_arg) > 0 else 0
-                lsp_char = int(char_arg)
-
-                # 🎯 FIX: Strict Regex & Cursor Centering Override
-                if symbol_arg:
-                    try:
-                        with open(path_arg, 'r', encoding='utf-8') as f:
-                            lines = f.readlines()
-                            import re
-                            
-                            def_pattern = re.compile(rf"^(?:class|def|async def)\s+{re.escape(symbol_arg)}\b")
-                            usage_pattern = re.compile(rf"\b{re.escape(symbol_arg)}\b")
-                            
-                            # Shift cursor into the middle of the word to prevent LSP boundary misses
-                            char_offset = len(symbol_arg) // 2
-
-                            if 0 <= lsp_line < len(lines) and def_pattern.search(lines[lsp_line].strip()):
-                                char_idx = lines[lsp_line].find(symbol_arg)
-                                lsp_char = char_idx + char_offset if char_idx != -1 else 0
-                            else:
-                                found = False
-                                for i, line in enumerate(lines):
-                                    if def_pattern.search(line.strip()):
-                                        lsp_line = i
-                                        char_idx = line.find(symbol_arg)
-                                        lsp_char = char_idx + char_offset if char_idx != -1 else 0
-                                        found = True
-                                        break
-                                        
-                                if not found:
-                                    if 0 <= lsp_line < len(lines) and usage_pattern.search(lines[lsp_line]):
-                                        char_idx = lines[lsp_line].find(symbol_arg)
-                                        lsp_char = char_idx + char_offset if char_idx != -1 else 0
-                                    else:
-                                        for i, line in enumerate(lines):
-                                            if usage_pattern.search(line):
-                                                lsp_line = i
-                                                char_idx = line.find(symbol_arg)
-                                                lsp_char = char_idx + char_offset if char_idx != -1 else 0
-                                                break
-                    except Exception as e:
-                        logger.warning(f"Failed to auto-calculate LSP coordinates: {e}")
-
-                payload = {
-                    "uri": path_arg,
-                    "line": lsp_line,
-                    "character": lsp_char
-                }
-                
-                response = await self.uds_server.request_client_context("get_references", payload)
-                
-                if isinstance(response, dict) and "error" in response:
-                    return f"LSP Error: {response['error']}"
-                    
-                refs = response if isinstance(response, list) else response.get("result", [])
-                if not refs:
-                    return "No cross-file references found for this symbol."
-                
-                # Recursively hunt for the 'line' key regardless of VS Code's object structure
-                def find_line(obj):
-                    if isinstance(obj, dict):
-                        if 'line' in obj: return obj['line']
-                        for v in obj.values():
-                            res = find_line(v)
-                            if res is not None: return res
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            res = find_line(item)
-                            if res is not None: return res
-                    return None
-
-                formatted_response = "Symbol References Found:\n"
-                for i, loc in enumerate(refs):
-                    uri_obj = loc.get('uri', {}) or loc.get('targetUri', {})
-                    file_path = uri_obj.get('fsPath') if isinstance(uri_obj, dict) else str(uri_obj)
-                    
-                    line_num = "Unknown"
-                    found_line = find_line(loc.get('range') or loc.get('targetSelectionRange') or loc)
-                    
-                    if found_line is not None:
-                        line_num = int(found_line) + 1
-                        
-                    formatted_response += f"- File: {file_path} (Line: {line_num})\n"
-                return formatted_response
-                
-            elif tool_name == "extract_code_structure":
-                ast_parser = CodebaseASTParser()
-                return ast_parser.get_node_at_line(
-                    arguments.get("file_path"), 
-                    arguments.get("line_number", 0)
-                )
-            else:
-                return f"Tool {tool_name} not found."
-                
-        except Exception as e:
-            return f"Error executing {tool_name}: {str(e)}"
-
-# --- Agent Core ---
 
 class Agent:
     """The central state machine managing the ReAct loop."""
 
-    def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None, workspace_root: Optional[str] = None, permission_callback=None):
+    def __init__(
+        self,
+        llm_provider,
+        config: Dict[str, Any],
+        uds_server=None,
+        workspace_root: Optional[str] = None,
+        permission_callback=None,
+    ):
         self.llm_provider = llm_provider
         self.uds_server = uds_server
         self.workspace_root = workspace_root or os.getcwd()
         self.sandbox_config = config.get("sandbox", {})
         self.search_config = config.get("search", {})
-        
+
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
         max_tokens = memory_config.get("max_tokens", 6000)
         dynamic_char_limit = int(max_tokens * 3.5 * 0.8)
-        
-        # Pass the workspace_root down to the dispatcher
+
         self.dispatcher = ToolDispatcher(
-            uds_server=uds_server, 
+            uds_server=uds_server,
             workspace_root=self.workspace_root,
             permission_callback=permission_callback,
             sandbox_config=self.sandbox_config,
-            max_file_read_chars=dynamic_char_limit
-        )      
+            max_file_read_chars=dynamic_char_limit,
+        )
         self.tool_registry = ToolRegistry(uds_server=uds_server)
         self.max_iterations = config.get("max_iterations", 25)
-        
+
         self.memory = SlidingContextManager(
             memory_config=memory_config,
             model_name=llm_config.get("model_name", "llama3:8b"),
             llm_provider=self.llm_provider,
-            llm_config=llm_config
+            llm_config=llm_config,
         )
 
-        # 🎯 Initialize the state ONCE so history survives multiple turns
         self.state = AgentState(user_goal="")
 
     async def reason(self, context: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Invokes the LLM and parses the structured JSON response."""
-
-        # OFF-LOAD TO THREAD: Prevents freezing the Textual UI
-        raw_response = await asyncio.to_thread(self.llm_provider.generate,context)
+        raw_response = await asyncio.to_thread(self.llm_provider.generate, context)
         logger.info(f"🧠 [Reasoning] LLM Output:\n{raw_response}")
 
         clean_response = raw_response.strip()
 
-        # 1. Strip markdown code block formatting if the LLM hallucinated it
-        markdown_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', clean_response, re.DOTALL)
+        markdown_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", clean_response, re.DOTALL)
         if markdown_match:
             clean_response = markdown_match.group(1)
 
-        # 2. Try parsing the cleaned response directly
         try:
             return json.loads(clean_response)
         except json.JSONDecodeError:
             pass
 
-        # Try to find the first JSON object in the string using regex
-        match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+        match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group(0))
             except json.JSONDecodeError:
-                pass # Fall through to the error handler below
-           
+                pass
+
         return {
-            "reasoning": "Failed to parse JSON. Remember to output ONLY a single valid JSON object.", 
-            "tool": "error", 
-            "tool_args": {"raw": raw_response}
+            "reasoning": "Failed to parse JSON. Remember to output ONLY a single valid JSON object.",
+            "tool": "error",
+            "tool_args": {"raw": raw_response},
         }
 
-    # 2. Make the run method ASYNC so we can await the IPC socket tools
     async def run(
         self,
         user_goal: str,
         ui_callback=None,
         auto_approve: bool = False,
         workflow_config: Optional[Dict[str, Any]] = None,
-        history_payload: list = None
+        history_payload: list = None,
     ) -> AgentState:
-        """The Main Agent Loop: Context -> Reason -> Tool -> Observation -> State Update."""
-
-        # Helper function to print to terminal AND the Textual UI
         def log(msg: str):
             if ui_callback:
                 ui_callback(msg)
             else:
                 logger.info(msg)
 
-        # 1. REHYDRATE STATE: If Python restarted, but the UI has history
         if history_payload and not self.state.history:
             log("🔄 [System] Restoring session context from UI...")
-            # Fallback to the first message's content if no new goal is provided
             self.state.user_goal = history_payload[0].get("content", "") if history_payload else user_goal
-            
+
             for msg_data in history_payload:
                 ui_role = msg_data.get("role", "user").lower()
-                
-                # Strip internal monologue from the rehydrated context window
                 if ui_role == "thought":
                     continue
-                    
-                # Map React frontend roles to backend Enums
+
                 role_str = "user"
                 if ui_role == "agent":
                     role_str = "assistant"
                 elif ui_role == "error":
-                    role_str = "tool"  # Treat system errors as tool observations
-                elif ui_role == "user":
-                    role_str = "user"
+                    role_str = "tool"
 
                 try:
-                    self.state.history.append(Message(
-                        role=Role(role_str), 
-                        content=msg_data.get("content", ""), 
-                        name=msg_data.get("name", "ui_rehydration")
-                    ))
+                    self.state.history.append(
+                        Message(
+                            role=Role(role_str),
+                            content=msg_data.get("content", ""),
+                            name=msg_data.get("name", "ui_rehydration"),
+                        )
+                    )
                 except ValueError:
                     continue
 
-        # 2. HANDLE NEW INPUT
         if user_goal:
-            # If we have history (from rehydration or an ongoing session), this is a follow-up
             is_followup = len(self.state.history) > 0
-            
             if not is_followup:
-                # Brand new task
                 self.state.user_goal = user_goal
                 self.state.is_complete = False
                 self.state.is_canceled = False
                 self.state.iterations = 0
-                self.state.max_iterations = self.max_iterations 
+                self.state.max_iterations = self.max_iterations
                 self.state.summary = ""
                 self.state.run_id = str(uuid.uuid4())
                 self.state.workflow_context = None
                 logger.info(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
             else:
-                # Continuing an existing task
-                self.state.is_complete = False 
+                self.state.is_complete = False
                 self.state.is_canceled = False
-                self.state.iterations = 0 # Reset iteration counter for this new segment
+                self.state.iterations = 0
                 logger.info(f"[bold cyan]▶️ --- Continuing Agent Loop ---[/bold cyan]\nFollow-up: {user_goal}")
 
-            # Append the user's new follow-up prompt
             self.state.history.append(Message(role=Role.USER, content=user_goal))
 
-            # 3. APPLY WORKFLOW MUTATIONS (Only if provided)
             if workflow_config:
                 orch_cfg = workflow_config.get("orchestrator_config", {})
                 if "max_iterations" in orch_cfg:
@@ -972,120 +162,109 @@ class Agent:
                     self.dispatcher.sandbox_config = self.sandbox_config
                 if "search" in orch_cfg:
                     self.search_config.update(orch_cfg["search"])
-                
-                # Store the context engineering rules for the system prompt
+
                 self.state.workflow_context = workflow_config.get("context_engineering", {})
 
-                # 4. Execute Pre-Flight Actions
                 for action in workflow_config.get("pre_flight_actions", []):
                     tool = action.get("tool")
                     args = action.get("args", {})
                     log(f"[bold yellow]✈️ [Pre-Flight][/bold yellow] Dispatching {tool}...")
-                    
                     if tool in self.tool_registry.tools:
                         obs = await self.tool_registry.execute_tool_async(tool, args)
                     else:
                         obs = await self.dispatcher.execute_async(tool, args, auto_approve=True)
-                    
                     self.state.history.append(Message(role=Role.TOOL, content=f"Pre-flight Observation: {obs}", name=tool))
         else:
             logger.info("[bold cyan]▶️ --- Resuming Agent Loop (No New Prompt) ---[/bold cyan]")
 
         my_run_id = self.state.run_id
 
-        while not self.state.is_complete and not self.state.is_canceled and self.state.iterations < self.state.max_iterations:
+        while (
+            not self.state.is_complete
+            and not self.state.is_canceled
+            and self.state.iterations < self.state.max_iterations
+        ):
             log(f"\n[dim]🔄 --- Iteration {self.state.iterations + 1} ---[/dim]")
-            
-            # Fetch dynamically from our properly named tool_registry
-            tool_descriptions = "\n".join([f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()])
 
-            # 3. Use an f-string so {tool_descriptions} actually gets injected!
-            # Note the double brackets {{ }} to escape JSON schema syntax inside an f-string.
+            tool_descriptions = "\n".join(
+                [f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()]
+            )
+
             system_prompt = f"""You are an autonomous agent. You must respond ONLY with valid JSON. 
 
-            Do not include any conversational text or markdown formatting. 
+Do not include any conversational text or markdown formatting. 
 
-            AVAILABLE CONTEXT TOOLS:
-            {tool_descriptions}
+AVAILABLE CONTEXT TOOLS:
+{tool_descriptions}
 
-            STRICT DIRECTIVES FOR TOOL SELECTION:
-            - TOOL HIERARCHY: NEVER use 'terminal_proxy' (e.g., 'ls', 'cat', 'grep', 'find', 'dir') to search, read, or inspect files.
-            - DIRECTORY LISTINGS & FILE READS: Use 'file_system' with action 'read'. Passing a directory path returns a directory listing without needing bash.
-            - CODE SEARCH: Always use 'search_codebase' instead of shell 'grep' or 'find'[cite: 3].
-            - TERMINAL_PROXY USE CASE: Use 'terminal_proxy' ONLY for running tests (pytest, npm test), compiling builds, or running project executables[cite: 3].
-            - BATCHING: Once you have the information needed, immediately proceed to write files or call 'finish_task' without redundant verification steps[cite: 3].
+STRICT DIRECTIVES FOR TOOL SELECTION:
+- TOOL HIERARCHY: NEVER use 'terminal_proxy' (e.g., 'ls', 'cat', 'grep', 'find', 'dir') to search, read, or inspect files.
+- DIRECTORY LISTINGS & FILE READS: Use 'file_system' with action 'read'. Passing a directory path returns a directory listing without needing bash.
+- CODE SEARCH: Always use 'search_codebase' instead of shell 'grep' or 'find'.
+- TERMINAL_PROXY USE CASE: Use 'terminal_proxy' ONLY for running tests (pytest, npm test), compiling builds, or running project executables.
+- BATCHING: Once you have the information needed, immediately proceed to write files or call 'finish_task' without redundant verification steps.
 
-            Your output must be a single JSON object with EXACTLY these keys: "reasoning" (string), "tool" (string), and "tool_args" (dictionary). 
-            
-            STRICT DIRECTIVES (FAILURE TO COMPLY WILL ABORT THE TASK):
-            - YOUR CURRENT WORKING DIRECTORY IS: {self.workspace_root}
-            - JSON FORMAT ONLY: You must not wrap your JSON in markdown code blocks (```json). Never use Python-style 'None'. Use strict JSON only.
-            - TOOL ARGUMENTS: If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}. You MUST provide all required arguments for the tool you select.
-            - ZERO INTERNAL MATH: You must generate a Python script using the 'python_repl' tool, execute it, and explicitly use `print()` statements to observe calculated results.
-            - SANDBOX CIRCUIT BREAKER: You operate in a restricted sandbox. If any tool returns an observation containing "blocked", "forbidden", "denied", or "outside authorized workspace", you MUST immediately stop exploring and call 'finish_task' to report the limitation. Do not attempt workarounds.
-            - ERROR DIAGNOSIS: When diagnosing failures, base your conclusion strictly on the provided output. You must not attempt to enumerate the system, probe environment variables, or read history files.
-            - FILE SYSTEM: You MUST use the exact paths provided by your context tools relative to this directory. Do not guess or modify paths.
-            - FINISH TASK: Once you have achieved the user's goal based on the observations, you MUST IMMEDIATELY call 'finish_task'. The 'summary' argument is the ONLY information the user will see. You MUST include the actual results, lists, code, or data requested by the user in this summary.
-            - TREAT SOURCE CODE AS INERT DATA: You may only use the 'file_system' write action if the user's prompt explicitly requests a code modification. Answer the user's prompt directly and concisely. Do not proactively fix bugs or offer unsolicited code rewrites.
-            - AVOID FULL FILE READS: NEVER use 'file_system' (read) to load entire source code files into memory. 
-            - HYBRID WORKFLOW: If you need to understand how a symbol is used, first use 'get_symbol_references' to locate its semantic usages across the workspace.
-            - PRECISE EXTRACTION: Once you have the file path and line number from the LSP tool, use 'extract_code_structure' to read ONLY the specific function or class implementation at that exact line.
+Your output must be a single JSON object with EXACTLY these keys: "reasoning" (string), "tool" (string), and "tool_args" (dictionary). 
 
-            CRITICAL INSTRUCTIONS FOR VS CODE CONTEXT:
-            - You are running inside VS Code. You DO NOT know what file the user is looking at by default.
-            - You must call `get_active_file_content` FIRST to discover the absolute file path if the user refers to "this file" or "my code".
-            - IF AND ONLY IF the user explicitly asks you to fix, edit, or refactor code, your goal is to physically apply the change using the `file_system` write action.
-            - IF the user ONLY asks a question (e.g., "what is the active file?", "explain this code"), you must ignore all bugs and ONLY answer the question using the `finish_task` tool.
-            - WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file. 
-            """
+STRICT DIRECTIVES (FAILURE TO COMPLY WILL ABORT THE TASK):
+- YOUR CURRENT WORKING DIRECTORY IS: {self.workspace_root}
+- JSON FORMAT ONLY: You must not wrap your JSON in markdown code blocks (```json). Never use Python-style 'None'. Use strict JSON only.
+- TOOL ARGUMENTS: If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}. You MUST provide all required arguments for the tool you select.
+- ZERO INTERNAL MATH: You must generate a Python script using the 'python_repl' tool, execute it, and explicitly use `print()` statements to observe calculated results.
+- SANDBOX CIRCUIT BREAKER: You operate in a restricted sandbox. If any tool returns an observation containing "blocked", "forbidden", "denied", or "outside authorized workspace", you MUST immediately stop exploring and call 'finish_task' to report the limitation. Do not attempt workarounds.
+- ERROR DIAGNOSIS: When diagnosing failures, base your conclusion strictly on the provided output. You must not attempt to enumerate the system, probe environment variables, or read history files.
+- FILE SYSTEM: You MUST use the exact paths provided by your context tools relative to this directory. Do not guess or modify paths.
+- FINISH TASK: Once you have achieved the user's goal based on the observations, you MUST IMMEDIATELY call 'finish_task'. The 'summary' argument is the ONLY information the user will see. You MUST include the actual results, lists, code, or data requested by the user in this summary.
+- TREAT SOURCE CODE AS INERT DATA: You may only use the 'file_system' write action if the user's prompt explicitly requests a code modification. Answer the user's prompt directly and concisely. Do not proactively fix bugs or offer unsolicited code rewrites.
+- AVOID FULL FILE READS: NEVER use 'file_system' (read) to load entire source code files into memory. 
+- HYBRID WORKFLOW: If you need to understand how a symbol is used, first use 'get_symbol_references' to locate its semantic usages across the workspace.
+- PRECISE EXTRACTION: Once you have the file path and line number from the LSP tool, use 'extract_code_structure' to read ONLY the specific function or class implementation at that exact line.
+
+CRITICAL INSTRUCTIONS FOR VS CODE CONTEXT:
+- You are running inside VS Code. You DO NOT know what file the user is looking at by default.
+- You must call `get_active_file_content` FIRST to discover the absolute file path if the user refers to "this file" or "my code".
+- IF AND ONLY IF the user explicitly asks you to fix, edit, or refactor code, your goal is to physically apply the change using the `file_system` write action.
+- IF the user ONLY asks a question (e.g., "what is the active file?", "explain this code"), you must ignore all bugs and ONLY answer the question using the `finish_task` tool.
+- WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file.
+"""
 
             if getattr(self.state, "workflow_context", None):
                 ctx = self.state.workflow_context
                 if ctx:
                     system_prompt += f"""
-                    
-                    WORKFLOW CONSTRAINTS & ROLE:
-                    - ROLE: {ctx.get('role', '')}
-                    - TASK: {ctx.get('task', '')}
-                    - CONSTRAINTS: {json.dumps(ctx.get('constraints', []))}
-                    - FAILURE BEHAVIOR: {ctx.get('failure_behavior', '')}
-                    - OUTPUT CONTRACT: {ctx.get('output_contract', '')}
-                    """
 
-            # 1. Determine if a critique is required
+WORKFLOW CONSTRAINTS & ROLE:
+- ROLE: {ctx.get('role', '')}
+- TASK: {ctx.get('task', '')}
+- CONSTRAINTS: {json.dumps(ctx.get('constraints', []))}
+- FAILURE BEHAVIOR: {ctx.get('failure_behavior', '')}
+- OUTPUT CONTRACT: {ctx.get('output_contract', '')}
+"""
+
             needs_reflection = False
-            
-            # Condition A: Mandatory Checkpoint (Every 3 iterations)
             if self.state.iterations > 0 and self.state.iterations % 3 == 0:
                 needs_reflection = True
-                
-            # Condition B: Mid-Stream Correction (Check if the last tool failed)
             elif self.state.history and self.state.history[-1].role == Role.TOOL:
                 last_obs = self.state.history[-1].content.lower()
                 if "error" in last_obs or ("exit code" in last_obs and "exit code 0" not in last_obs):
                     needs_reflection = True
 
-            # 2. Push the UI state BEFORE the LLM starts generating
             if self.uds_server and needs_reflection:
                 await self.uds_server.send_notification(
-                    "agent_status", 
-                    {"status": "reflecting", "message": "Critique Required: Evaluating recent actions..."}
+                    "agent_status",
+                    {"status": "reflecting", "message": "Critique Required: Evaluating recent actions..."},
                 )
 
-            # 3. Inject the mandatory critique directive into the system prompt
             if needs_reflection:
                 system_prompt += "\n\nCRITIQUE REQUIRED: Review your last observations. Did your last action succeed? State your revised approach before calling the next tool."
 
-            # 4. Build context and execute reasoning
             context = self.memory.build_safe_context(self.state, system_prompt)
             llm_response = await self.reason(context)
 
-            # 🎯 GHOST LOOP PREVENTION: Check if a new task hijacked the state while we waited
             if self.state.run_id != my_run_id:
                 log("👻 [Agent] Aborting orphaned ghost loop (new task started).")
                 raise asyncio.CancelledError("Ghost loop aborted.")
 
-            # 🎯 Emergency abort check after heavy LLM processing
             if self.state.is_canceled:
                 log("🛑 [Agent] Task was manually cancelled by the user.")
                 break
@@ -1095,24 +274,21 @@ class Agent:
             tool_name = llm_response.get("tool", "unknown")
             tool_args = llm_response.get("tool_args", {})
 
-            # If the LLM got lazy and returned a string instead of a dict
             if isinstance(tool_args, str):
-                log(f"[dim]⚠️ Auto-correcting malformed tool_args string into a dictionary...[/dim]")
+                log("[dim]⚠️ Auto-correcting malformed tool_args string into a dictionary...[/dim]")
                 if tool_name == "terminal_proxy":
                     tool_args = {"command": tool_args}
                 elif tool_name == "math_operation":
                     tool_args = {"expression": tool_args}
                 else:
-                    tool_args = {} # Fallback
+                    tool_args = {}
 
             reasoning = llm_response.get("reasoning", "No reasoning provided.")
-
             log(f"[bold magenta]🧠 [Reasoning][/bold magenta] {reasoning}")
-            
+
             if self.uds_server:
                 await self.uds_server.send_notification(
-                    "agent_status", 
-                    {"status": "thinking", "message": reasoning}
+                    "agent_status", {"status": "thinking", "message": reasoning}
                 )
 
             log(f"[bold yellow]🔧 [Dispatching][/bold yellow] {tool_name} with args: {tool_args}")
@@ -1121,54 +297,36 @@ class Agent:
                 self.state.is_complete = True
                 summary = tool_args.get("summary", "Task completed successfully.")
                 log(f"[bold green]✅ [Task Complete][/bold green] {summary}")
-
-                # Actually save the summary to the state so the server can return it
-                self.state.summary = summary 
+                self.state.summary = summary
                 self.state.history.append(Message(role=Role.TOOL, content=summary, name=tool_name))
                 break
 
-            # 4. Route the tool call to the correct handler
             dispatcher_tools = ["file_system", "terminal_proxy", "python_repl", "apply_inline_diff"]
-            
-            # First, check if the tool was dynamically stripped from the registry
+
             if tool_name not in self.tool_registry.tools and tool_name != "finish_task":
                 observation = f"Error: Tool '{tool_name}' is disabled or not recognized in this workflow."
-                
-            # Route to the Dispatcher class
             elif tool_name in dispatcher_tools:
                 observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=auto_approve)
-                
-            # Route to the Registry class
             else:
                 if tool_name == "web_search":
-                    # Inject run-specific metadata and profile limits
                     tool_args["run_id"] = self.state.run_id
                     tool_args["search_config"] = self.search_config
                     tool_args["max_chars"] = getattr(self.dispatcher, "max_file_read_chars", 4000)
-
-                observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)      
+                observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
 
             log(f"[bold blue]👀 [Observation][/bold blue]\n{observation}")
 
-            # Hard-code the Circuit Breaker to sever the loop
             obs_str = str(observation).lower()
-            
-            # 🎯 FIX: Use startswith() so the agent doesn't trip on its own 
-            # source code when running git diff or cat commands.
             is_violation = (
-                obs_str.startswith("error: command blocked by sandbox") or
-                obs_str.startswith("security violation:")
+                obs_str.startswith("error: command blocked by sandbox")
+                or obs_str.startswith("security violation:")
             )
-            
+
             if is_violation:
                 log("🛑 [System] Sandbox violation detected. Forcing agent termination.")
                 self.state.is_complete = True
-                
-                # Provide a clean, user-friendly summary instead of dumping raw output
                 clean_error_msg = "Task aborted by system sandbox constraints. The requested action was blocked for security reasons."
                 self.state.summary = clean_error_msg
-                
-                # Append the clean message to the history
                 self.state.history.append(Message(role=Role.TOOL, content=self.state.summary, name="finish_task"))
                 break
 
@@ -1183,26 +341,20 @@ class Agent:
             log("\n⚠️ --- Agent Loop Terminated (Max Iterations Reached) ---")
         else:
             log("\n🏁 --- Agent Loop Completed ---")
-            
+
         return self.state
 
     def is_path_authorized(self, target_path: str) -> bool:
-        """Validates if a target path is within the workspace or explicitly authorized."""
         sandbox_config = self.sandbox_config
-        
-        # 1. Global sandbox bypass
         if not sandbox_config.get("strict_mode", True):
             return True
 
-        # Resolve the absolute path to prevent directory traversal (e.g., '../../etc/passwd')
         abs_target = os.path.abspath(os.path.expanduser(target_path))
         abs_workspace = os.path.abspath(self.workspace_root)
 
-        # 2. Check primary workspace root
         if abs_target.startswith(abs_workspace):
             return True
 
-        # 3. Check authorized external paths
         allowed_paths = sandbox_config.get("allowed_external_paths", [])
         for allowed_dir in allowed_paths:
             abs_allowed = os.path.abspath(os.path.expanduser(allowed_dir))
@@ -1210,117 +362,3 @@ class Agent:
                 return True
 
         return False
-# --- Agent Core ---
-
-class UniversalLLMProvider:
-    """Connects the Python agent loop using the official OpenAI SDK."""
-    
-    def __init__(self, endpoint_url: str, model: str, api_key: Optional[str] = None):
-        self.endpoint_url = endpoint_url
-        self.model = model
-        
-        import httpx
-        from openai import OpenAI
-        import os
-
-        # 🎯 FIX: Strip explicit routes universally so the SDK never double-appends them
-        base_url = endpoint_url.split("/chat/completions")[0].split("/responses")[0]
-
-        proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        
-        # Local Ollama Routing
-        if "127.0.0.1" in endpoint_url or "localhost" in endpoint_url or "11434" in endpoint_url:
-            self.client = OpenAI(base_url=base_url, api_key="ollama", http_client=http_client)
-            
-        # Azure Foundry & Standard OpenAI Routing
-        else:
-            # Use Entra ID if Azure and no explicit key is provided (or if user typed 'entra')
-            if "azure.com" in endpoint_url and (not api_key or api_key.lower() in ["none", "", "entra"]):
-                from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-                
-                # Fetch the Microsoft Entra token provider
-                token_provider = get_bearer_token_provider(
-                    DefaultAzureCredential(), "https://ai.azure.com/.default"
-                )
-                
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.info("🔐 Azure Entra ID authentication enabled via OpenAI SDK.")
-                
-                # The OpenAI SDK natively accepts the token callable instead of a string!
-                self.client = OpenAI(base_url=base_url, api_key=token_provider, http_client=http_client)
-            else:
-                # Standard static API Key (OpenAI or Azure)
-                self.client = OpenAI(base_url=base_url, api_key=api_key or "sk-dummy", http_client=http_client)
-
-    def generate(self, context: list, require_json: bool = True) -> Optional[str]:
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        try:
-            # 🎯 Dynamic Routing: Use the new v1 Responses API if the user configured it
-            if "azure.com" in self.endpoint_url and "/responses" in self.endpoint_url:
-                # Note: The Responses API accepts 'input' instead of 'messages'
-                response = self.client.responses.create(
-                    model=self.model,
-                    input=context
-                )
-                # Parse the response based on Azure's v1 Responses API structure
-                try:
-                    return response.output[0].content[0].text
-                except (KeyError, IndexError, AttributeError):
-                    return str(getattr(response, 'output', response))
-                    
-            # 🎯 Default: Standard Chat Completions (OpenAI & Legacy Azure)
-            else:
-                kwargs = {
-                    "model": self.model,
-                    "messages": context,
-                }
-                if require_json:
-                    kwargs["response_format"] = { "type": "json_object" }
-                    
-                response = self.client.chat.completions.create(**kwargs)
-                return response.choices[0].message.content
-                
-        except Exception as e:
-            logger.error(f"❌ [SDK Connection Error] Failed to generate: {e}")
-            raise RuntimeError(f"LLM Provider unreachable: {e}")
-
-# --- Mock Implementation for Testing ---
-
-class MockLLMProvider:
-    """Mocks the LLM generating structured JSON responses for local testing."""
-    def __init__(self, mock_responses: List[str]):
-        self.mock_responses = mock_responses
-        self.index = 0
-
-    def generate(self, context: List[Dict[str, str]]) -> str:
-        if self.index < len(self.mock_responses):
-            response = self.mock_responses[self.index]
-            self.index += 1
-            return response
-        return '{"reasoning": "No more instructions.", "tool": "finish_task", "tool_args": {}}'
-
-# if __name__ == "__main__":
-#     # Simulate the LLM deciding what to do over multiple turns
-#     mocked_responses = [
-#         '{"reasoning": "I need to check the current directory contents to find the project root.", "tool": "terminal_proxy", "tool_args": {"command": "ls -la"}}',
-#         '{"reasoning": "I see the config file. I will read its contents via the file system.", "tool": "file_system", "tool_args": {"action": "read", "path": "./config.json"}}',
-#         '{"reasoning": "I have the necessary information from the config file.", "tool": "finish_task", "tool_args": {}}'
-#     ]
-    
-#     llm = MockLLMProvider(mocked_responses)
-#     agent = Agent(llm_provider=llm)
-    
-#     final_state = agent.run("Locate the project root and read the configuration file.")
-
-if __name__ == "__main__":
-    llm = OllamaProxyProvider()
-    
-    # We pass an empty config for the test run
-    agent = Agent(llm_provider=llm, config={})
-    
-    # Use asyncio.run() to execute the new async loop
-    final_state = asyncio.run(agent.run("What is the name of the function defined in my current file?"))
