@@ -588,7 +588,7 @@ class JsonRpcUdsServer:
             self.handle_client, 
             self.host, 
             self.port,
-            limit=10 * 1024 * 1024
+            limit=50 * 1024 * 1024
         )
         
         logger.info(f"🔌 TCP JSON-RPC Server listening on {self.host}:{self.port}")

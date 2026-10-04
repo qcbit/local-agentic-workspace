@@ -768,11 +768,19 @@ async function indexWorkspaceOnLoad(udsClient: UdsClient) {
     console.log(`🚀 Starting initial workspace index: ${files.length} files found.`);
 
     for (const fileUri of files) {
+        // EXCLUDE LOCK FILES: No reason to semantically embed a package lockfile
+        if (fileUri.fsPath.endsWith('package-lock.json') || fileUri.fsPath.endsWith('yarn.lock')) {
+            continue;
+        }
+
         try {
-            const document = await vscode.workspace.openTextDocument(fileUri);
+            // Read raw bytes from disk to prevent loading 400+ files into the editor model
+            const contentBytes = await vscode.workspace.fs.readFile(fileUri);
+            const content = Buffer.from(contentBytes).toString('utf8');
+            
             await udsClient.request('sync_file', {
                 file_path: fileUri.fsPath,
-                content: document.getText()
+                content: content
             });
         } catch (error) {
             console.error(`Failed to index on load: ${fileUri.fsPath}`, error);
