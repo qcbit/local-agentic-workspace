@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.11.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.6...v0.11.0) (2026-10-04)
+
+
+### Features
+
+* **RAG:** Complete lifecycle index management ([f5ba582](https://github.com/qcbit/local-agentic-workspace/commit/f5ba582ea91260f522390e8b7502c63efc3552ae))
+
+
+### Bug Fixes
+
+* **RAG:** handle file deletion, rename, movement, and reconciliation on startup ([aec31ee](https://github.com/qcbit/local-agentic-workspace/commit/aec31ee6ea3e3b2ff2c12d6d3a28a677f6adee3e))
+* **UX:** Add queue to address latency ([5e58a1d](https://github.com/qcbit/local-agentic-workspace/commit/5e58a1db98c62156c0a1be7c5650a99f52161e85))
+
 ## [0.10.6](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.5...v0.10.6) (2026-10-04)
 
 
