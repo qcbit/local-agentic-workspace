@@ -65,10 +65,46 @@ class LocalVectorStore:
             return embeddings[0].tolist()
 
     # Inside LocalVectorStore class in vector_store.py
+    def delete_file(self, file_path: str) -> int:
+        """Removes all chunks belonging to a specific file from the LanceDB table.
+
+        Returns 1 on success, 0 on failure.
+        """
+        try:
+            self.table.delete(f"file_path = '{file_path}'")
+            logger.info(f"🗑️ Deleted all chunks for {file_path}")
+            return 1
+        except Exception as e:
+            logger.error(f"Failed to delete file '{file_path}' from LanceDB: {e}")
+            return 0
+
+    def _get_stored_hash(self, file_path: str) -> Optional[str]:
+        """Queries LanceDB for the stored hash of a given file_path.
+
+        Returns the hash if found, or None if the file is not indexed.
+        """
+        try:
+            df = self.table.search().where(f"file_path = '{file_path}'").limit(1).to_df()
+            if df is not None and len(df) > 0:
+                return df.iloc[0]["file_hash"]
+        except Exception as e:
+            logger.warning(f"Hash lookup failed for {file_path}: {e}")
+        return None
+
     def upsert_file(self, file_path: str, file_hash: str, content: str):
+        # 0. Incremental sync: Check if this exact version is already indexed
+        stored_hash = self._get_stored_hash(file_path)
+        if stored_hash is not None:
+            if stored_hash == file_hash:
+                logger.debug(f"⏭️  Skipping {file_path} — hash unchanged ({file_hash[:8]}…)")
+                return
+            else:
+                logger.info(f"🔄 File modified: {file_path} (old {stored_hash[:8]}… → new {file_hash[:8]}…)")
+                self.delete_file(file_path)
+
         # 1. Split the massive file into bite-sized chunks
         text_chunks, chunk_type = self.chunker.chunk_file(file_path, content)
-        
+
         if not text_chunks:
             return
 

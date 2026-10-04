@@ -428,6 +428,8 @@ class JsonRpcUdsServer:
                 return self._success_response(req_id, self.config)
             elif method == "sync_file":
                 return self._success_response(req_id, self._handle_sync_file(params))
+            elif method == "delete_file":
+                return self._success_response(req_id, self._handle_delete_file(params))
             elif method == "search_codebase":
                 return self._success_response(req_id, self._handle_search_codebase(params))
             elif method == "reset_session":
@@ -502,6 +504,18 @@ class JsonRpcUdsServer:
         self.vector_store.upsert_file(file_path, file_hash, content)
 
         return {"status": "success", "indexed_path": file_path}
+
+    def _handle_delete_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Removes all indexed chunks for the given file_path from LanceDB."""
+        file_path = params.get("file_path")
+
+        if not file_path:
+            raise ValueError("file_path is required for delete_file")
+
+        deleted = self.vector_store.delete_file(file_path)
+        logger.info(f"🗑️ [IPC] delete_file called for: {file_path} (deleted={deleted})")
+
+        return {"status": "success", "deleted_path": file_path, "deleted": bool(deleted)}
 
     def _ensure_agent(self):
         """Initializes the persistent agent if it doesn't exist."""
