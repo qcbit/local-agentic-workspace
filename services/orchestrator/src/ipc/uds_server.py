@@ -170,8 +170,6 @@ class JsonRpcUdsServer:
         """Registers an async callback for a specific incoming notification."""
         self.notification_handlers[method_name] = callback_coroutine
 
-    
-
     async def _sync_worker(self):
         """Background worker that pulls files from the queue and indexes them without blocking the event loop."""
         logger.info("Background sync worker started.")
@@ -578,6 +576,10 @@ class JsonRpcUdsServer:
 
     async def start(self):
         """Binds the TCP socket."""
+        # 🧹 Run startup database reconciliation in a background thread
+        logger.info("Starting database reconciliation sweep...")
+        await asyncio.to_thread(self.vector_store.reconcile_database)
+
         # Start the background sync worker
         self.sync_task = asyncio.create_task(self._sync_worker())
         
