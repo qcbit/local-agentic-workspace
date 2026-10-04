@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.11.0...v0.11.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **RAG:** update types of files to sync and increase file size to 50MB ([212a47b](https://github.com/qcbit/local-agentic-workspace/commit/212a47b8c27c4c950d06bb64e22910ffa2903359))
+* **RAG:** update types of files to sync and increase file size to 50MB ([ae74082](https://github.com/qcbit/local-agentic-workspace/commit/ae74082045267ea99beb8f9b562dbd95876b41db))
+
 ## [0.11.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.10.6...v0.11.0) (2026-10-04)
 
 
