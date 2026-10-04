@@ -303,6 +303,47 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // Handle File Deletions
+    context.subscriptions.push(
+        vscode.workspace.onDidDeleteFiles(async (event) => {
+            for (const uri of event.files) {
+                try {
+                    await udsClient.request("delete_file", {
+                        file_path: uri.fsPath
+                    });
+                } catch (error) {
+                    console.error(`Failed to notify backend of deletion for ${uri.fsPath}`, error);
+                }
+            }
+        })
+    );
+
+    // Handle File Renames & Movements
+    context.subscriptions.push(
+        vscode.workspace.onDidRenameFiles(async (event) => {
+            for (const file of event.files) {
+                try {
+                    // 1. Immediately drop the old ghost path from LanceDB
+                    await udsClient.request("delete_file", {
+                        file_path: file.oldUri.fsPath
+                    });
+                    
+                    // 2. Read the new file from disk
+                    const contentBytes = await vscode.workspace.fs.readFile(file.newUri);
+                    const content = Buffer.from(contentBytes).toString('utf8');
+                    
+                    // 3. Drop the new file into the backend's async queue
+                    await udsClient.request("sync_file", {
+                        file_path: file.newUri.fsPath,
+                        content: content
+                    });
+                } catch (error) {
+                    console.error(`Failed to process rename for ${file.newUri.fsPath}`, error);
+                }
+            }
+        })
+    );
+
     // 3. Initialize the Status Bar (reads from config.json)
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.command = 'localAgenticWorkspace.showSettings'; // Clicking it opens settings!

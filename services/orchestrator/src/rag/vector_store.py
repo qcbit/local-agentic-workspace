@@ -158,3 +158,29 @@ class LocalVectorStore:
         logger.info(f"⏱️  FastEmbed CPU: {embed_ms:.2f}ms | ⚡ LanceDB Search: {db_ms:.2f}ms")
         
         return results
+
+    def reconcile_database(self):
+        """Scans the database on startup and drops chunks for files that no longer exist on disk."""
+        if not hasattr(self, 'table'):
+            return
+
+        try:
+            # 1. Get all unique file paths currently in the vector database
+            # We use a set to deduplicate paths across thousands of chunks
+            df = self.table.search().limit(None).to_df()
+            if df is None or df.empty or "file_path" not in df.columns:
+                return
+                
+            indexed_files = set(df["file_path"].tolist())
+            
+            # 2. Verify existence on the filesystem
+            ghost_files = [path for path in indexed_files if not os.path.exists(path)]
+            
+            # 3. Purge ghost files
+            if ghost_files:
+                logger.info(f"🧹 [Reconciliation] Found {len(ghost_files)} ghost files. Purging from database...")
+                for path in ghost_files:
+                    self.delete_file(path)
+                    
+        except Exception as e:
+            logger.error(f"Failed to run database reconciliation sweep: {e}")

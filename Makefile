@@ -65,6 +65,7 @@ clean-full: clean
 build-frontend:
 	@echo "Transpiling the frontend..."
 	@echo "Compiling the React/TS frontend..."
+	@cd apps/vscode-extension && npm install
 	@cd apps/vscode-extension && npm run compile
 
 build-backend:
