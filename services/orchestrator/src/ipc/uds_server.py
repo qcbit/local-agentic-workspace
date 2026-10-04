@@ -162,11 +162,32 @@ class JsonRpcUdsServer:
         self.active_writer = None
         self.persistent_agent = None
 
+        # Background indexing queue to prevent blocking the event loop
+        self.sync_queue = asyncio.Queue()
+        self.sync_task = None
+
     def register_notification_handler(self, method_name: str, callback_coroutine):
         """Registers an async callback for a specific incoming notification."""
         self.notification_handlers[method_name] = callback_coroutine
 
     
+
+    async def _sync_worker(self):
+        """Background worker that pulls files from the queue and indexes them without blocking the event loop."""
+        logger.info("Background sync worker started.")
+        while True:
+            try:
+                file_path, file_hash, file_content = await self.sync_queue.get()
+                logger.info(f"⏳ [Sync Worker] Starting background index for: {file_path}")
+                # Execute the CPU-bound embedding and LanceDB operations in a separate thread
+                await asyncio.to_thread(self.vector_store.upsert_file, file_path, file_hash, file_content)
+                logger.info(f"✅ [Sync Worker] Finished background index for: {file_path}")
+                self.sync_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"❌ [Sync Worker] Error during background sync: {e}")
+
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Reads incoming streams, dispatches JSON-RPC requests, and writes responses."""
 
@@ -427,7 +448,7 @@ class JsonRpcUdsServer:
                 # Return the currently loaded configuration directly to VS Code
                 return self._success_response(req_id, self.config)
             elif method == "sync_file":
-                return self._success_response(req_id, self._handle_sync_file(params))
+                return self._success_response(req_id, await self._handle_sync_file(params))
             elif method == "delete_file":
                 return self._success_response(req_id, self._handle_delete_file(params))
             elif method == "search_codebase":
@@ -489,8 +510,8 @@ class JsonRpcUdsServer:
             logger.error(f"Internal error processing request: {e}")
             return self._error_response(req.get("id") if isinstance(req, dict) else None, -32603, str(e))
 
-    def _handle_sync_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Hashes the incoming file and upserts it into LanceDB."""
+    async def _handle_sync_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Hashes the incoming file and queues it for background LanceDB upsert."""
         file_path = params.get("file_path")
         content = params.get("content", "")
 
@@ -500,10 +521,10 @@ class JsonRpcUdsServer:
         # Generate a hash to track file modifications
         file_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
 
-        # Run the upsert (this parses the AST and generates vectors)
-        self.vector_store.upsert_file(file_path, file_hash, content)
+        # Push to background queue instead of blocking the event loop
+        await self.sync_queue.put((file_path, file_hash, content))
 
-        return {"status": "success", "indexed_path": file_path}
+        return {"status": "success", "indexed_path": file_path, "message": "Queued for background sync"}
 
     def _handle_delete_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Removes all indexed chunks for the given file_path from LanceDB."""
@@ -557,6 +578,9 @@ class JsonRpcUdsServer:
 
     async def start(self):
         """Binds the TCP socket."""
+        # Start the background sync worker
+        self.sync_task = asyncio.create_task(self._sync_worker())
+        
         # Increase the StreamReader buffer limit to 10MB to handle large file syncs
         server = await asyncio.start_server(
             self.handle_client, 

@@ -12,7 +12,7 @@
   },
   "description": "Air-gapped local agentic coding assistant for VS Code",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.138.0"
   },
   "main": "./out/extension.js",
   "activationEvents": [],
