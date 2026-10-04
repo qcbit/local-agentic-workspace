@@ -35,12 +35,10 @@ Before running the extension in development mode, ensure you have the following 
 
 ### 1. Prepare the Local LLM (Optional)
 
-If using local execution, ensure Ollama is running and pull your preferred models. A quantized 14B model is recommended for the best balance of reasoning and speed.
+If using local execution, ensure Ollama is running and pull your preferred models. Qwen3.8 is shown to have very good reasoning and coding ability.
 
 ```bash
-ollama run qwen2.5-coder:14b-instruct-q4_K_M
-
-
+ollama run qwen3.8:latest
 ```
 
 ### 2. Start Development Watchers
@@ -49,13 +47,11 @@ Open the repository root in your terminal and run the unified make command to in
 
 ```bash
 make dev
-
-
 ```
 
 ### 3. Launch the Extension
 
-With `make dev` running in the background, open the repository in VS Code and press **F5**. The extension will automatically detect Development Mode and launch the Python orchestrator daemon on `127.0.0.1:7777`.
+With `make dev` running in the background, open the repository in VS Code and press **Ctrl+F5**. The extension will automatically detect Development Mode and launch the Python orchestrator daemon on `127.0.0.1:7777`.
 
 ## ⚙️ Configuration & Multiple Profiles
 
@@ -107,11 +103,7 @@ When configuring your memory or token limits for local models, refer to this tab
 
 | Model (Ollama Tag) | Parameters | Native Context Window | Recommended `maxTokens` Setting |
 | --- | --- | --- | --- |
-| `qwen2.5-coder:14b` | 14B | 32,768 | 24000 |
-| `qwen2.5-coder:7b` | 7B | 32,768 | 24000 |
-| `llama3:8b` | 8B | 8,192 | 6000 |
-| `mistral:7b` | 7B | 8,192 | 6000 |
-| `deepseek-coder-v2` | 16B | 32,768 | 24000 |
+| `qwen3.8:latest` | 27B | 256,000 | 128000 |
 
 *(Note: Cloud models like Google Gemini support context windows up to 1,048,576 tokens).*
 
