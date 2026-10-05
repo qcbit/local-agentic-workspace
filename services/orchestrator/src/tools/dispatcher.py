@@ -1,7 +1,7 @@
 import asyncio
 import difflib
 import json
-import logging
+from loguru import logger
 import os
 import subprocess
 from typing import Any, Dict, Optional
@@ -11,9 +11,10 @@ from services.orchestrator.src.tools.sandbox import (
     validate_python_syntax,
     validate_terminal_command,
 )
+from opentelemetry import trace
 
-logger = logging.getLogger(__name__)
-
+tracer = trace.get_tracer(__name__)
+audit_logger = logger.bind(audit=True)
 
 class ToolDispatcher:
     """Handles structured JSON tool requests with a Tiered Operational Rights Proxy."""
@@ -122,25 +123,35 @@ class ToolDispatcher:
                 logger.info(f"⚡ [Auto-Approve] Silently writing to '{path}'...")
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
+                audit_logger.info(f"AUDIT LOG: Auto-approved file write to '{path}'")
                 return f"Successfully wrote to file '{path}'."
 
             if not self.uds_server:
                 return "Error: Cannot request write permission. IPC Server not attached."
 
             logger.info(f"⏸️  [Proxy] Requesting write permission for '{path}'...")
-            response = await self.uds_server.request_client_context(
-                "request_write_permission", {"path": path, "content": content}
-            )
+            
+            with tracer.start_as_current_span("hitl_write_approval") as span:
+                span.set_attribute("hitl.file_path", path)
+                
+                response = await self.uds_server.request_client_context(
+                    "request_write_permission", {"path": path, "content": content}
+                )
 
-            if "content" in response and "timed out" in response["content"]:
-                return response["content"]
+                if "content" in response and "timed out" in response["content"]:
+                    span.set_attribute("hitl.action", "timeout")
+                    return response["content"]
 
-            if response.get("status") == "approved":
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                return f"Successfully wrote to file '{path}'."
-            else:
-                return f"Action Blocked: The user denied the file write request for '{path}'."
+                if response.get("status") == "approved":
+                    span.set_attribute("hitl.action", "approved")
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    audit_logger.info(f"AUDIT LOG: User APPROVED file write to '{path}'")
+                    return f"Successfully wrote to file '{path}'."
+                else:
+                    span.set_attribute("hitl.action", "rejected")
+                    audit_logger.warning(f"AUDIT LOG: User REJECTED file write to '{path}'")
+                    return f"Action Blocked: The user denied the file write request for '{path}'."
 
         return f"Error: Unsupported file system action '{action}'."
 
@@ -160,6 +171,7 @@ class ToolDispatcher:
 
         if auto_approve:
             logger.info(f"⚡ [Auto-Approve] Silently executing '{command}'...")
+            audit_logger.info(f"AUDIT LOG: Auto-approved terminal command: '{command}'")
             user_timeout = 30
             try:
                 process = await asyncio.create_subprocess_shell(
@@ -182,49 +194,60 @@ class ToolDispatcher:
             logger.info(f"⏸️  [Proxy] Requesting TUI permission for '{command}'...")
             is_approved = await self.permission_callback(f"Allow shell execution:\n\n{command}")
             if is_approved:
+                audit_logger.info(f"AUDIT LOG: User APPROVED terminal command: '{command}' via TUI")
                 result = subprocess.run(
                     command, shell=True, capture_output=True, text=True, cwd=self.workspace_root
                 )
                 output = result.stdout if result.returncode == 0 else result.stderr
                 return f"Command exit code {result.returncode}.\nOutput:\n{output}"
             else:
+                audit_logger.warning(f"AUDIT LOG: User REJECTED terminal command: '{command}' via TUI")
                 return "Action Blocked: The user denied the shell execution request."
 
         if not self.uds_server:
             return "Error: Cannot request shell permission. IPC Server not attached."
 
         logger.info(f"⏸️  [Proxy] Requesting shell execution permission for '{command}'...")
-        response = await self.uds_server.request_client_context(
-            "request_shell_permission", {"command": command}
-        )
+        
+        with tracer.start_as_current_span("hitl_shell_approval") as span:
+            span.set_attribute("hitl.command", command)
+            
+            response = await self.uds_server.request_client_context(
+                "request_shell_permission", {"command": command}
+            )
 
-        if "content" in response and "timed out" in response["content"]:
-            return response["content"]
+            if "content" in response and "timed out" in response["content"]:
+                span.set_attribute("hitl.action", "timeout")
+                return response["content"]
 
-        if response.get("status") == "approved":
-            try:
-                user_timeout = int(response.get("timeout", 30))
-            except (ValueError, TypeError):
-                user_timeout = 30
-
-            try:
-                process = await asyncio.create_subprocess_shell(
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=self.workspace_root,
-                )
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=user_timeout)
-                output = stdout.decode("utf-8") if process.returncode == 0 else stderr.decode("utf-8")
-                return f"Command exit code {process.returncode}.\nOutput:\n{output}"
-            except asyncio.TimeoutError:
+            if response.get("status") == "approved":
+                span.set_attribute("hitl.action", "approved")
+                audit_logger.info(f"AUDIT LOG: User APPROVED terminal command: '{command}'")
                 try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                return f"Error: Command execution timed out after {user_timeout} seconds."
-        else:
-            return "Action Blocked: The user denied the shell execution request."
+                    user_timeout = int(response.get("timeout", 30))
+                except (ValueError, TypeError):
+                    user_timeout = 30
+
+                try:
+                    process = await asyncio.create_subprocess_shell(
+                        command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=self.workspace_root,
+                    )
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=user_timeout)
+                    output = stdout.decode("utf-8") if process.returncode == 0 else stderr.decode("utf-8")
+                    return f"Command exit code {process.returncode}.\nOutput:\n{output}"
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    return f"Error: Command execution timed out after {user_timeout} seconds."
+            else:
+                span.set_attribute("hitl.action", "rejected")
+                audit_logger.warning(f"AUDIT LOG: User REJECTED terminal command: '{command}'")
+                return "Action Blocked: The user denied the shell execution request."
 
     async def _handle_apply_inline_diff_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
         path = args.get("file_path", args.get("path", args.get("file", "")))
@@ -255,20 +278,6 @@ class ToolDispatcher:
             return f"Error: search_string found {count} times. Include more surrounding lines to make it unique."
 
         new_content = content.replace(search_string, replace_string)
-
-        diff_lines = list(
-            difflib.unified_diff(
-                content.splitlines(keepends=True),
-                new_content.splitlines(keepends=True),
-                fromfile=f"a/{os.path.basename(path)}",
-                tofile=f"b/{os.path.basename(path)}",
-                n=3,
-            )
-        )
-
-        diff_str = "".join(diff_lines)
-        if diff_str:
-            logger.info(f"📝 [Auto-Diff] Changes staged for {path}:\n{diff_str}")
 
         return await self._handle_file_system_async(
             {"action": "write", "path": abs_target, "content": new_content},

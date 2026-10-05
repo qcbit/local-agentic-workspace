@@ -16,3 +16,9 @@ openai==3.4.0
 azure-identity==1.25.3
 aiohttp==3.14.3
 pandas==3.0.6
+arize-phoenix==20.19.0
+arize-phoenix-otel
+opentelemetry-sdk==1.45.0
+opentelemetry-exporter-otlp==1.45.0
+openinference-instrumentation-openai==0.1.63
+loguru==0.7.3

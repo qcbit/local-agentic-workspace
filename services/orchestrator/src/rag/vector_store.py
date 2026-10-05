@@ -1,6 +1,9 @@
 from fastembed import TextEmbedding
 import lancedb
-import logging
+from loguru import logger
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
 import os
 import pyarrow as pa
 import requests
@@ -8,7 +11,6 @@ import time
 from typing import List, Dict, Any, Optional
 from rag.semantic_chunker import SemanticChunker
 
-logger = logging.getLogger(__name__)
 
 
 class LocalVectorStore:
@@ -146,18 +148,30 @@ class LocalVectorStore:
                 logger.warning("Table does not exist yet. Please index files first.")
                 return []
 
-        t0 = time.time()
-        query_vector = self._generate_embedding(query)
-        t1 = time.time()
-        
-        results = self.table.search(query_vector).limit(limit).to_list()
-        t2 = time.time()
-        
-        embed_ms = (t1 - t0) * 1000
-        db_ms = (t2 - t1) * 1000
-        logger.info(f"⏱️  FastEmbed CPU: {embed_ms:.2f}ms | ⚡ LanceDB Search: {db_ms:.2f}ms")
-        
-        return results
+        with tracer.start_as_current_span("rag_semantic_search") as span:
+            span.set_attribute("search.query", query)
+            span.set_attribute("search.limit", limit)
+
+            t0 = time.time()
+            query_vector = self._generate_embedding(query)
+            t1 = time.time()
+            
+            results = self.table.search(query_vector).limit(limit).to_list()
+            t2 = time.time()
+            
+            embed_ms = (t1 - t0) * 1000
+            db_ms = (t2 - t1) * 1000
+            logger.info(f"⏱️  FastEmbed CPU: {embed_ms:.2f}ms | ⚡ LanceDB Search: {db_ms:.2f}ms")
+            
+            span.set_attribute("latency.embedding_ms", embed_ms)
+            span.set_attribute("latency.lancedb_ms", db_ms)
+            span.set_attribute("search.results_count", len(results))
+            
+            for i, res in enumerate(results):
+                span.set_attribute(f"result.{i}.file_path", str(res.get("file_path")))
+                span.set_attribute(f"result.{i}.distance", float(res.get("_distance", 0.0)))
+            
+            return results
 
     def reconcile_database(self):
         """Scans the database on startup and drops chunks for files that no longer exist on disk."""
