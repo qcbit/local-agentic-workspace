@@ -5,6 +5,12 @@ import copy
 import hashlib
 import httpx
 import json
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from openinference.instrumentation.openai import OpenAIInstrumentor
+from loguru import logger
 import logging
 import openai
 import os
@@ -63,25 +69,96 @@ for path in (src_dir, workspace_root):
 # does not naturally know about the services directory
 # until the internal sys.path.insert logic executes.
 from rag.vector_store import LocalVectorStore
-from services.orchestrator.src.agent.agent_loop import Agent, UniversalLLMProvider, Message, Role
+from services.orchestrator.src.agent.agent_loop import Agent, Message, Role
+from services.orchestrator.src.llm.provider import UniversalLLMProvider
 from services.orchestrator.src.logging.log_filter import scrub_secrets_from_string, SecretRedactingFilter
 
-# 🎯 Write logs to both the VS Code output panel AND a persistent file
-log_file = os.path.expanduser("~/.agentic_backend.log")
+from opentelemetry import trace
+tracer = trace.get_tracer(__name__)
 
-logging.basicConfig(
-    level=logging.INFO, 
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_file, encoding='utf-8')
-    ]
-)
-logger = logging.getLogger(__name__)
-logger.addFilter(SecretRedactingFilter())
-# Apply the filter globally to all outputs (terminal and file)
-for handler in logger.handlers:
-    handler.addFilter(SecretRedactingFilter())
+
+def setup_logging(config_data=None):
+    # 1. Defaults
+    obs_enabled = False
+    obs_endpoint = "http://127.0.0.1:6006/v1/traces"
+    log_level = "INFO"
+    log_rotation = "10 MB"
+    log_retention = "5 days"
+
+    if config_data:
+        active_profile_name = config_data.get("active_profile", "Default")
+        profiles = config_data.get("profiles", {})
+        active_config = profiles.get(active_profile_name, config_data) if isinstance(profiles, dict) else config_data
+        
+        if "observability" in active_config:
+            obs_enabled = active_config["observability"].get("enabled", obs_enabled)
+            obs_endpoint = active_config["observability"].get("endpoint", obs_endpoint)
+        
+        if "logging" in active_config:
+            log_level = active_config["logging"].get("level", log_level)
+            log_rotation = active_config["logging"].get("rotation", log_rotation)
+            log_retention = active_config["logging"].get("retention", log_retention)
+
+    # 2. Configure OpenTelemetry ONLY if enabled
+    if obs_enabled:
+        try:
+            from phoenix.otel import register
+            register(
+                project_name="local-agentic-workspace",
+                endpoint=obs_endpoint
+            )
+        except Exception:
+            pass # Only initialize once
+
+        try:
+            OpenAIInstrumentor().instrument()
+        except Exception:
+            pass
+
+    # 3. Configure Loguru
+    log_dir = os.path.join(workspace_root, ".agentic_workspace", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    def secret_redacting_filter(record):
+        record["message"] = scrub_secrets_from_string(str(record["message"]))
+        return True
+
+    logger.remove()
+    logger.add(sys.stdout, format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>", filter=secret_redacting_filter, level=log_level)
+    
+    # Standard flat text log for lean operation
+    logger.add(
+        os.path.join(log_dir, "agentic_backend.log"),
+        rotation=log_rotation,
+        retention=log_retention,
+        level=log_level,
+        filter=secret_redacting_filter
+    )
+
+    # 4. Only write heavy JSONL traces and audit logs if observability is explicitly enabled
+    if obs_enabled:
+        logger.add(
+            os.path.join(log_dir, "telemetry.jsonl"), 
+            serialize=True,
+            rotation=log_rotation,
+            retention=log_retention,
+            level=log_level,
+            filter=lambda record: "audit" not in record["extra"] and secret_redacting_filter(record)
+        )
+        
+        # Immutable Security & Audit Logger
+        logger.add(
+            os.path.join(log_dir, "audit.jsonl"),
+            serialize=True,
+            rotation="50 MB",
+            retention="1 year",
+            level="INFO",
+            filter=lambda record: "audit" in record["extra"] and secret_redacting_filter(record)
+        )
+
+# Initial setup before config is loaded
+setup_logging()
+
 config_path = os.path.join(workspace_root, '.agentic_config.json')
 
 def load_config():
@@ -108,6 +185,15 @@ def load_config():
                 },
                 "memory": {
                     "max_tokens": 6000
+                },
+                "logging": {
+                    "level": "INFO",
+                    "rotation": "10 MB",
+                    "retention": "5 days"
+                },
+                "observability": {
+                    "enabled": False,
+                    "endpoint": "http://127.0.0.1:6006/v1/traces"
                 }
             }
         }
@@ -151,6 +237,9 @@ class JsonRpcUdsServer:
         self.host = host
         self.port = port
         self.config = load_config()
+        
+        # Apply configured logging settings
+        setup_logging(self.config)
 
         self.running = False
         self.notification_handlers = {}
@@ -176,10 +265,13 @@ class JsonRpcUdsServer:
         while True:
             try:
                 file_path, file_hash, file_content = await self.sync_queue.get()
-                logger.info(f"⏳ [Sync Worker] Starting background index for: {file_path}")
-                # Execute the CPU-bound embedding and LanceDB operations in a separate thread
-                await asyncio.to_thread(self.vector_store.upsert_file, file_path, file_hash, file_content)
-                logger.info(f"✅ [Sync Worker] Finished background index for: {file_path}")
+                with tracer.start_as_current_span("background_sync_processing") as span:
+                    span.set_attribute("queue.depth", self.sync_queue.qsize())
+                    span.set_attribute("sync.file_path", file_path)
+                    
+                    logger.info(f"⏳ [Sync Worker] Starting background index for: {file_path} (Queue depth: {self.sync_queue.qsize()})")
+                    await asyncio.to_thread(self.vector_store.upsert_file, file_path, file_hash, file_content)
+                    logger.info(f"✅ [Sync Worker] Finished background index for: {file_path}")
                 self.sync_queue.task_done()
             except asyncio.CancelledError:
                 break
@@ -195,11 +287,19 @@ class JsonRpcUdsServer:
                 if not data:
                     break
 
+                import time
+                t0 = time.time()
                 payload = data.decode('utf-8').strip()
                 if not payload:
                     continue
                     
                 req = json.loads(payload)
+                t1 = time.time()
+                
+                with tracer.start_as_current_span("ipc_receive") as span:
+                    span.set_attribute("ipc.payload_bytes", len(data))
+                    span.set_attribute("ipc.deserialization_ms", (t1 - t0) * 1000)
+                    span.set_attribute("ipc.method", req.get("method", "response"))
 
                 # 🛡️ SANITIZE LOGS: Mask the API key before printing
                 safe_msg = sanitize_ipc_payload(req)
@@ -339,6 +439,9 @@ class JsonRpcUdsServer:
 
         # 6. Reset the persistent agent to force it to load the new profile
         self.persistent_agent = None
+        
+        # Apply new logging config
+        setup_logging(self.config)
 
         logger.info(f"✅ Config successfully updated and saved for profile: '{active_profile}'")
         

@@ -35,6 +35,13 @@ export const SettingsPanel: React.FC = () => {
     const [strictMode, setStrictMode] = useState(true);
     const [allowedExternalPaths, setAllowedExternalPaths] = useState('');
 
+    // Logging & Observability
+    const [logLevel, setLogLevel] = useState('INFO');
+    const [logRotation, setLogRotation] = useState('10 MB');
+    const [logRetention, setLogRetention] = useState('5 days');
+    const [obsEnabled, setObsEnabled] = useState(false);
+    const [obsEndpoint, setObsEndpoint] = useState('http://127.0.0.1:6006/v1/traces');
+
     // Search Provider Settings (Tiered Strategy)
     const [tavilyApiKey, setTavilyApiKey] = useState('');
     const [braveApiKey, setBraveApiKey] = useState('');
@@ -53,6 +60,13 @@ export const SettingsPanel: React.FC = () => {
             setStrictMode(profile.sandbox?.strict_mode ?? true);
             setAllowedExternalPaths((profile.sandbox?.allowed_external_paths || []).join('\n'));
 
+            // Observability config
+            setLogLevel(profile.logging?.level || 'INFO');
+            setLogRotation(profile.logging?.rotation || '10 MB');
+            setLogRetention(profile.logging?.retention || '5 days');
+            setObsEnabled(profile.observability?.enabled ?? false);
+            setObsEndpoint(profile.observability?.endpoint || 'http://127.0.0.1:6006/v1/traces');
+
             // Search config
             setSearxngUrl(profile.search?.searxng_url || 'http://localhost:8080');
             setSearchEnabled(profile.search?.enabled ?? true);
@@ -65,6 +79,11 @@ export const SettingsPanel: React.FC = () => {
             setCharsPerToken(4.0);
             setStrictMode(true);
             setAllowedExternalPaths('');
+            setLogLevel('INFO');
+            setLogRotation('10 MB');
+            setLogRetention('5 days');
+            setObsEnabled(false);
+            setObsEndpoint('http://127.0.0.1:6006/v1/traces');
             setSearxngUrl('http://localhost:8080');
             setSearchEnabled(true);
         }
@@ -125,6 +144,8 @@ export const SettingsPanel: React.FC = () => {
             },
             memory: { max_tokens: 6000 },
             sandbox: { strict_mode: true, allowed_external_paths: [] },
+            logging: { level: "INFO", rotation: "10 MB", retention: "5 days" },
+            observability: { enabled: false, endpoint: "http://127.0.0.1:6006/v1/traces" },
             search: { enabled: true, searxng_url: "http://localhost:8080" }
         };
         vscode.postMessage({
@@ -177,6 +198,15 @@ export const SettingsPanel: React.FC = () => {
                     sandbox: {
                         strict_mode: strictMode,
                         allowed_external_paths: allowedExternalPaths.split('\n').map(p => p.trim()).filter(p => p !== '')
+                    },
+                    logging: {
+                        level: logLevel,
+                        rotation: logRotation,
+                        retention: logRetention
+                    },
+                    observability: {
+                        enabled: obsEnabled,
+                        endpoint: obsEndpoint
                     },
                     search: {
                         enabled: searchEnabled,
@@ -384,6 +414,65 @@ export const SettingsPanel: React.FC = () => {
                             disabled={!strictMode}
                             placeholder={"~/.ollama/models\n/Users/shared/libraries"}
                             style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
+                        />
+                    </div>
+
+                    <hr style={{ width: '100%', borderColor: 'var(--vscode-widget-border)' }} />
+                    
+                    <h3>Observability & Telemetry</h3>
+                    <p style={{ fontSize: '12px', color: 'var(--vscode-descriptionForeground)' }}>
+                        Activate enterprise-grade tracing and structured logging. By default, telemetry is disabled to preserve CPU/memory and reduce I/O overhead.
+                    </p>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                        <input 
+                            type="checkbox" 
+                            checked={obsEnabled}
+                            onChange={(e) => setObsEnabled(e.target.checked)}
+                        />
+                        <label><strong>Enable OpenTelemetry & Arize Phoenix Tracing</strong></label>
+                    </div>
+
+                    {obsEnabled && (
+                        <div style={{ display: 'flex', flexDirection: 'column', marginBottom: '1rem', padding: '0.5rem', backgroundColor: 'var(--vscode-editor-inactiveSelectionBackground)', borderRadius: '4px' }}>
+                            <label>OTLP Exporter Endpoint</label>
+                            <input 
+                                type="text" 
+                                value={obsEndpoint} 
+                                onChange={(e) => setObsEndpoint(e.target.value)} 
+                                style={inputStyle} 
+                            />
+                            <p style={{ fontSize: '11px', margin: '4px 0 0 0', opacity: 0.8 }}>Local default: http://127.0.0.1:6006/v1/traces</p>
+                        </div>
+                    )}
+
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        <label>Log Level</label>
+                        <select value={logLevel} onChange={(e) => setLogLevel(e.target.value)} style={inputStyle}>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        <label>Log Rotation (e.g., '10 MB', '1 day')</label>
+                        <input 
+                            type="text" 
+                            value={logRotation} 
+                            onChange={(e) => setLogRotation(e.target.value)} 
+                            style={inputStyle} 
+                        />
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        <label>Log Retention (e.g., '5 days', '3 weeks')</label>
+                        <input 
+                            type="text" 
+                            value={logRetention} 
+                            onChange={(e) => setLogRetention(e.target.value)} 
+                            style={inputStyle} 
                         />
                     </div>
                 </>
