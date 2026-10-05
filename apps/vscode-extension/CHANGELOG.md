@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.11.1...v0.12.0) (2026-10-05)
+
+
+### Features
+
+* **Logging:** Add telemetry for advance observable capabilities ([96334e8](https://github.com/qcbit/local-agentic-workspace/commit/96334e8239cb2f0f486c6062ca1d57a47f637d67))
+* **Logging:** Add telemetry for advance observable capabilities ([cbcdebf](https://github.com/qcbit/local-agentic-workspace/commit/cbcdebfdf6a784a0987275fec50fa53fcccbc8ac))
+
 ## [0.11.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.11.0...v0.11.1) (2026-10-04)
 
 
