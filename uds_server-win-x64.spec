@@ -18,6 +18,7 @@ a = Analysis(
         'memory',
         'lancedb',
         'fastembed',
+        'fastembed.rerank.cross_encoder',
         'aiohttp'
     ] + aio_hiddenimports,
     hookspath=[],

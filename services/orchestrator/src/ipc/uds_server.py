@@ -76,6 +76,23 @@ from services.orchestrator.src.logging.log_filter import scrub_secrets_from_stri
 from opentelemetry import trace
 tracer = trace.get_tracer(__name__)
 
+def find_auto_approve(d):
+    if isinstance(d, dict):
+        for k, v in d.items():
+            if str(k).lower() in ["auto_approve", "autoapprove"]:
+                if isinstance(v, str):
+                    return v.lower() == "true"
+                return bool(v)
+            if isinstance(v, dict):
+                res = find_auto_approve(v)
+                if res is not None:
+                    return res
+            if isinstance(v, list):
+                for item in v:
+                    res = find_auto_approve(item)
+                    if res is not None:
+                        return res
+    return None
 
 def setup_logging(config_data=None):
     # 1. Defaults
@@ -164,8 +181,6 @@ config_path = os.path.join(workspace_root, '.agentic_config.json')
 def load_config():
     """Load config from the workspace, fallback to global, or create a default."""
     local_config_path = os.path.join(workspace_root, '.agentic_config.json')
-    
-    # 1. Try Workspace Config
     if os.path.exists(local_config_path):
         try:
             with open(local_config_path, 'r') as f:
@@ -173,7 +188,6 @@ def load_config():
         except Exception as e:
             logger.warning(f"Error reading local config: {e}")
             
-    # Default configuration with a flexible 'profiles' dictionary
     default_config = {
         "active_profile": "Default",
         "profiles": {
@@ -207,7 +221,6 @@ def save_config(new_config, force_global=False):
     """Save the updated config. Prefers local workspace unless forced global."""
     local_config_path = os.path.join(workspace_root, '.agentic_config.json')
     target_path = global_config_path if force_global else local_config_path
-    
     try:
         with open(target_path, 'w') as f:
             json.dump(new_config, f, indent=4)
@@ -227,7 +240,6 @@ def get_resource_path(relative_path: str) -> str:
     """Get absolute path to resource, works for dev and for PyInstaller one-file binaries."""
     # getattr safely checks for _MEIPASS without angering the linter
     base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
-
     return os.path.join(base_path, relative_path)
 
 class JsonRpcUdsServer:
@@ -237,21 +249,14 @@ class JsonRpcUdsServer:
         self.host = host
         self.port = port
         self.config = load_config()
-        
-        # Apply configured logging settings
         setup_logging(self.config)
-
         self.running = False
         self.notification_handlers = {}
-        
         logger.info("Initializing LanceDB Vector Store...")
-        self.vector_store = LocalVectorStore()
-
+        self.vector_store = LocalVectorStore(workspace_root=workspace_root, config=self.config)
         self.pending_requests = {}
         self.active_writer = None
         self.persistent_agent = None
-
-        # Background indexing queue to prevent blocking the event loop
         self.sync_queue = asyncio.Queue()
         self.sync_task = None
 
@@ -265,13 +270,20 @@ class JsonRpcUdsServer:
         while True:
             try:
                 file_path, file_hash, file_content = await self.sync_queue.get()
+                
+                # Create a cleaner relative path for terminal logging
+                try:
+                    short_path = os.path.relpath(file_path, workspace_root)
+                except ValueError:
+                    short_path = file_path
+                    
                 with tracer.start_as_current_span("background_sync_processing") as span:
                     span.set_attribute("queue.depth", self.sync_queue.qsize())
                     span.set_attribute("sync.file_path", file_path)
                     
-                    logger.info(f"⏳ [Sync Worker] Starting background index for: {file_path} (Queue depth: {self.sync_queue.qsize()})")
+                    logger.info(f"⏳ [Sync Worker] Start index: {short_path} (Queue depth: {self.sync_queue.qsize()})")
                     await asyncio.to_thread(self.vector_store.upsert_file, file_path, file_hash, file_content)
-                    logger.info(f"✅ [Sync Worker] Finished background index for: {file_path}")
+                    logger.info(f"✅ [Sync Worker] Finish index: {short_path}")
                 self.sync_queue.task_done()
             except asyncio.CancelledError:
                 break
@@ -301,9 +313,7 @@ class JsonRpcUdsServer:
                     span.set_attribute("ipc.deserialization_ms", (t1 - t0) * 1000)
                     span.set_attribute("ipc.method", req.get("method", "response"))
 
-                # 🛡️ SANITIZE LOGS: Mask the API key before printing
                 safe_msg = sanitize_ipc_payload(req)
-                
                 logger.debug(f"🕵️ [RAW SOCKET] {json.dumps(safe_msg)}")
 
                 # --- Smart Client Routing ---
@@ -312,7 +322,6 @@ class JsonRpcUdsServer:
                 if req.get("method") in ["sync_file", "update_config", "get_config", "ping", "execute_agent_task"]:
                     self.active_writer = writer
 
-                # Is this an unprompted notification from VS Code? (Has method, no ID)
                 if "method" in req and "id" not in req:
                     method = req["method"]
                     params = req.get("params", {})
@@ -322,10 +331,14 @@ class JsonRpcUdsServer:
                         if self.persistent_agent and hasattr(self.persistent_agent, 'state'):
                             self.persistent_agent.state.is_canceled = True
                             logger.info("🛑 Emergency brake pulled! Stopping agent loop...")
+                            # Unblock any pending IPC UI requests immediately
+                            for req_id, future in self.pending_requests.items():
+                                if not future.done():
+                                    future.set_result({"status": "denied", "content": "Action Blocked: Task was canceled."})
+                            self.pending_requests.clear()
                         continue
 
                     if method in self.notification_handlers:
-                        # Spin up the handler in the background
                         asyncio.create_task(self.notification_handlers[method](params))
                     else:
                         logger.warning(f"⚠️ [IPC] No handler registered for notification: {method}")
@@ -412,48 +425,32 @@ class JsonRpcUdsServer:
     def handle_update_config(self, payload: dict):
         active_profile = payload.get("active_profile")
         profile_settings = payload.get("profile_settings", {})
-
         if not active_profile:
             return {"error": "active_profile is required"}
-
-        # 1. Update the active profile pointer in memory
         self.config["active_profile"] = active_profile
-
-        # 2. Ensure the profiles dictionary exists
         if "profiles" not in self.config:
             self.config["profiles"] = {}
-
-        # 3. Ensure the specific profile entry exists before merging
         if active_profile not in self.config["profiles"]:
             self.config["profiles"][active_profile] = {}
 
-        # 4. Safely deep merge the incoming settings from the UI
+        # Safely deep merge the incoming settings from the UI
         if profile_settings:
             self.config["profiles"][active_profile] = deep_update(
                 self.config["profiles"][active_profile], 
                 profile_settings
             )
-
-        # 5. Save the unified state to disk using the standard helper
         save_config(self.config)
-
-        # 6. Reset the persistent agent to force it to load the new profile
         self.persistent_agent = None
-        
-        # Apply new logging config
         setup_logging(self.config)
-
         logger.info(f"✅ Config successfully updated and saved for profile: '{active_profile}'")
         
-        # 7. CRITICAL: Return the full config so the React frontend can update its state
+        # CRITICAL: Return the full config so the React frontend can update its state
         return {"status": "success", "config": self.config}
 
     async def process_request(self, payload: str) -> Dict[str, Any]:
-        """Validates and routes the JSON-RPC 2.0 payload."""
         req = {}
         try:
             req = json.loads(payload)
-            
             method = req["method"]
             params = req.get("params", {})
             req_id = req["id"]
@@ -466,11 +463,16 @@ class JsonRpcUdsServer:
                 if not goal:
                     return self._error_response(req_id, -32602, "Invalid params: 'goal' is required")
 
-                is_auto_approve = params.get("auto_approve", False)
+                is_auto_approve = find_auto_approve(req)
+                if is_auto_approve is None:
+                    is_auto_approve = False
                 if is_auto_approve:
                     logger.info("⚡ [Agent Execution] Auto-approve is enabled. Agent will execute without user confirmation.")
 
                 logger.info(f"🧠 [Agent Execution] Starting task: {goal}")
+                
+                # Immediately notify the frontend that the agent is busy to force the Stop button to render
+                await self.send_notification("agent_status", {"status": "busy", "message": "Initializing task..."})
 
                 workflow_config = params.get("workflow_config", None)
                 history_payload = params.get("history", [])
@@ -489,7 +491,6 @@ class JsonRpcUdsServer:
                             "iterations": result_state.iterations
                         })
 
-                    # Extract final observation
                     final_observation = "Task failed or max iterations reached."
                     if result_state.is_complete and result_state.history:
                         last_msg = result_state.history[-1]
@@ -506,9 +507,21 @@ class JsonRpcUdsServer:
                     logger.error(f"Agent execution failed: {e}")
                     return self._error_response(req_id, -32000, f"Agent execution error: {str(e)}")
                     
+            elif method == "cancel_agent_task":
+                if self.persistent_agent and hasattr(self.persistent_agent, 'state'):
+                    self.persistent_agent.state.is_canceled = True
+                    logger.info("🛑 Emergency brake pulled via request! Stopping agent loop...")
+                    for rid, future in self.pending_requests.items():
+                        if not future.done():
+                            future.set_result({"status": "denied", "content": "Action Blocked: Task was canceled."})
+                    self.pending_requests.clear()
+                return self._success_response(req_id, {"status": "canceled"})
+
             elif method == "resume_agent_task":
                 mode = params.get("mode", "continue")
-                is_auto_approve = params.get("auto_approve", False)
+                is_auto_approve = find_auto_approve(req)
+                if is_auto_approve is None:
+                    is_auto_approve = False
                 
                 if not self.persistent_agent:
                     return self._error_response(req_id, -32000, "No active agent session to resume.")
@@ -529,7 +542,6 @@ class JsonRpcUdsServer:
                         "iterations": result_state.iterations
                     })
                     
-                # Extract final observation as normal
                 final_observation = "Task failed or max iterations reached."
                 if result_state.history and result_state.history[-1].name == "finish_task":
                     final_observation = result_state.history[-1].content
@@ -546,7 +558,6 @@ class JsonRpcUdsServer:
                     return self._error_response(req_id, -32000, res["error"])
                 return self._success_response(req_id, res)
             elif method == "get_config":
-                # Return the currently loaded configuration directly to VS Code
                 return self._success_response(req_id, self.config)
             elif method == "sync_file":
                 return self._success_response(req_id, await self._handle_sync_file(params))
@@ -567,14 +578,12 @@ class JsonRpcUdsServer:
                 for msg in params.get("history", []):
                     role_str = msg.get("role")
                     content = msg.get("content", "")
-                    
                     if role_str == "error":
                         continue  # Skip local UI errors
                         
                     # Map the frontend 'agent' role to the backend Role.ASSISTANT enum
                     backend_role = Role.ASSISTANT if role_str == "agent" else Role.USER
                     restored_history.append(Message(role=backend_role, content=content))
-                    
                 self.persistent_agent.state.history = restored_history
                 logger.info(f"⏪ Restored {len(restored_history)} messages to agent memory.")
                 return self._success_response(req_id, {"status": "restored"})
@@ -584,10 +593,8 @@ class JsonRpcUdsServer:
                 profile_data = params.get("profile_data", {})
                 if not profile_name:
                     return self._error_response(req_id, -32602, "Profile name is required")
-                
                 if "profiles" not in self.config:
                     self.config["profiles"] = {}
-                
                 self.config["profiles"][profile_name] = profile_data
                 save_config(self.config)
                 return self._success_response(req_id, {"status": "success", "profiles": self.config["profiles"]})
@@ -596,7 +603,6 @@ class JsonRpcUdsServer:
                 profile_name = params.get("profile_name")
                 if profile_name == "Default" or profile_name == self.config.get("active_profile"):
                     return self._error_response(req_id, -32600, "Cannot delete the default or currently active profile.")
-                
                 if profile_name in self.config.get("profiles", {}):
                     del self.config["profiles"][profile_name]
                     save_config(self.config)
@@ -615,7 +621,6 @@ class JsonRpcUdsServer:
         """Hashes the incoming file and queues it for background LanceDB upsert."""
         file_path = params.get("file_path")
         content = params.get("content", "")
-
         if not file_path:
             raise ValueError("file_path is required for sync_file")
 
@@ -624,19 +629,15 @@ class JsonRpcUdsServer:
 
         # Push to background queue instead of blocking the event loop
         await self.sync_queue.put((file_path, file_hash, content))
-
         return {"status": "success", "indexed_path": file_path, "message": "Queued for background sync"}
 
     def _handle_delete_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Removes all indexed chunks for the given file_path from LanceDB."""
         file_path = params.get("file_path")
-
         if not file_path:
             raise ValueError("file_path is required for delete_file")
-
         deleted = self.vector_store.delete_file(file_path)
         logger.info(f"🗑️ [IPC] delete_file called for: {file_path} (deleted={deleted})")
-
         return {"status": "success", "deleted_path": file_path, "deleted": bool(deleted)}
 
     def _ensure_agent(self):
@@ -649,7 +650,6 @@ class JsonRpcUdsServer:
         active_config = profiles.get(active_profile_name, self.config) if isinstance(profiles, dict) else self.config
         
         llm_config = active_config.get("llm", active_config)
-        
         endpoint = (llm_config.get("endpoint_url") or llm_config.get("endpoint") or 
                    self.config.get("endpoint_url") or self.config.get("endpoint"))
         model_name = (llm_config.get("model_name") or llm_config.get("model") or 
@@ -685,17 +685,13 @@ class JsonRpcUdsServer:
 
         # Start the background sync worker
         self.sync_task = asyncio.create_task(self._sync_worker())
-        
-        # Increase the StreamReader buffer limit to 10MB to handle large file syncs
         server = await asyncio.start_server(
             self.handle_client, 
             self.host, 
             self.port,
             limit=50 * 1024 * 1024
         )
-        
         logger.info(f"🔌 TCP JSON-RPC Server listening on {self.host}:{self.port}")
-        
         async with server:
             await server.serve_forever()
 
@@ -703,7 +699,6 @@ class JsonRpcUdsServer:
         import time
         query = params.get("query", "")
         limit = params.get("limit", 5)
-
         if not query:
             raise ValueError("Query string is required for search.")
 
@@ -722,7 +717,6 @@ class JsonRpcUdsServer:
             
         elapsed_ms = (time.time() - start_time) * 1000
         logger.info(f"🔍 Vector search completed in {elapsed_ms:.2f}ms")
-
         return {
             "status": "success",
             "results": clean_results,
@@ -768,7 +762,6 @@ def sanitize_ipc_payload(payload: dict) -> dict:
                 # 2. Recurse deeper
                 else:
                     _clean_node(value)
-                    
         elif isinstance(node, list):
             for item in node:
                 _clean_node(item)
@@ -781,9 +774,7 @@ async def handle_terminal_error(params: dict):
     command = params.get("command", "unknown")
     exit_code = params.get("exit_code", -1)
     error_output = params.get("error_output", "")
-    
     logger.info(f"\n🚨 [Proactive AI] Intercepted terminal error for command: {command}")
-    
     goal = (
         f"The user ran the terminal command `{command}` which failed with exit code {exit_code}.\n"
         f"Here is the error output:\n```\n{error_output}\n```\n"
@@ -800,7 +791,6 @@ async def handle_terminal_error(params: dict):
             endpoint_url=active_config.get("llm", {}).get("endpoint_url"),
             model=active_config.get("llm", {}).get("model_name")
         )
-        
         agent = Agent(llm_provider=llm, config=active_config, uds_server=server)
         logger.info("🧠 [Proactive AI] Spinning up background agent to deduce a fix...")
         await agent.run(goal)
@@ -811,19 +801,15 @@ if __name__ == "__main__":
     import sys
     host = '127.0.0.1'
     port = 7777
-    
     if "--port" in sys.argv:
         idx = sys.argv.index("--port")
         if idx + 1 < len(sys.argv):
             port = int(sys.argv[idx + 1])
-            
     server = JsonRpcUdsServer(host=host, port=port)
     
     # Register the handler before starting the server
     server.register_notification_handler("terminal_error_detected", handle_terminal_error)
-    
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:
-        # 🎯 No file cleanup needed for TCP sockets!
         logger.info("Shutting down TCP server gracefully.")

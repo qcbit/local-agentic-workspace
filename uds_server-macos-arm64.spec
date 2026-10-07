@@ -14,7 +14,8 @@ a = Analysis(
         'agent',
         'memory',
         'lancedb',
-        'fastembed'
+        'fastembed',
+        'fastembed.rerank.cross_encoder'
     ],
     hookspath=[],
     hooksconfig={},

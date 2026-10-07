@@ -48,6 +48,14 @@ export const SettingsPanel: React.FC = () => {
     const [searxngUrl, setSearxngUrl] = useState('http://localhost:8080');
     const [searchEnabled, setSearchEnabled] = useState(true);
 
+    // Reranker Settings
+    const [rerankEnabled, setRerankEnabled] = useState(true);
+    const [rerankModel, setRerankModel] = useState('BAAI/bge-reranker-base');
+    const [topK, setTopK] = useState(5);
+    const [candidatePoolK, setCandidatePoolK] = useState('auto');
+    const [maxLatencyMs, setMaxLatencyMs] = useState(250);
+    const [fallbackToDistance, setFallbackToDistance] = useState(true);
+
     const applyProfileState = (profileName: string, targetConfig: any) => {
         const profile = targetConfig?.profiles?.[profileName];
         if (profile) {
@@ -70,6 +78,14 @@ export const SettingsPanel: React.FC = () => {
             // Search config
             setSearxngUrl(profile.search?.searxng_url || 'http://localhost:8080');
             setSearchEnabled(profile.search?.enabled ?? true);
+
+            // RAG & Reranker config
+            setRerankEnabled(profile.rag?.rerank?.enabled ?? true);
+            setRerankModel(profile.rag?.rerank?.model || 'BAAI/bge-reranker-base');
+            setTopK(profile.rag?.rerank?.top_k ?? 5);
+            setCandidatePoolK(profile.rag?.rerank?.candidate_pool_k || 'auto');
+            setMaxLatencyMs(profile.rag?.rerank?.max_latency_ms ?? 250);
+            setFallbackToDistance(profile.rag?.rerank?.fallback_to_distance ?? true);
         } else {
             setEndpointUrl('http://127.0.0.1:11434/v1/chat/completions');
             setApiKey('');
@@ -86,6 +102,12 @@ export const SettingsPanel: React.FC = () => {
             setObsEndpoint('http://127.0.0.1:6006/v1/traces');
             setSearxngUrl('http://localhost:8080');
             setSearchEnabled(true);
+            setRerankEnabled(true);
+            setRerankModel('BAAI/bge-reranker-base');
+            setTopK(5);
+            setCandidatePoolK('auto');
+            setMaxLatencyMs(250);
+            setFallbackToDistance(true);
         }
     };
 
@@ -146,7 +168,16 @@ export const SettingsPanel: React.FC = () => {
             sandbox: { strict_mode: true, allowed_external_paths: [] },
             logging: { level: "INFO", rotation: "10 MB", retention: "5 days" },
             observability: { enabled: false, endpoint: "http://127.0.0.1:6006/v1/traces" },
-            search: { enabled: true, searxng_url: "http://localhost:8080" }
+            search: { enabled: true, searxng_url: "http://localhost:8080" },
+            rag: {
+                rerank: {
+                    enabled: true,
+                    model: "BAAI/bge-reranker-base",
+                    candidate_pool_k: "auto",
+                    max_latency_ms: 250,
+                    fallback_to_distance: true
+                }
+            }
         };
         vscode.postMessage({
             command: 'createProfile',
@@ -211,6 +242,16 @@ export const SettingsPanel: React.FC = () => {
                     search: {
                         enabled: searchEnabled,
                         searxng_url: searxngUrl
+                    },
+                    rag: {
+                        rerank: {
+                            enabled: rerankEnabled,
+                            model: rerankModel,
+                            top_k: topK,
+                            candidate_pool_k: candidatePoolK,
+                            max_latency_ms: maxLatencyMs,
+                            fallback_to_distance: fallbackToDistance
+                        }
                     }
                 }
             }
@@ -475,6 +516,29 @@ export const SettingsPanel: React.FC = () => {
                             style={inputStyle} 
                         />
                     </div>
+
+                    <hr style={{ width: '100%', borderColor: 'var(--vscode-widget-border)' }} />
+                    <h3>RAG & Semantic Search</h3>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                        <input 
+                            type="checkbox" 
+                            checked={rerankEnabled}
+                            onChange={(e) => setRerankEnabled(e.target.checked)}
+                        />
+                        <label>Enable Hardware-Aware Cross-Encoder Reranking</label>
+                    </div>
+                    {rerankEnabled && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginLeft: '1.5rem' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                <label>Reranker Model</label>
+                                <input type="text" value={rerankModel} onChange={(e) => setRerankModel(e.target.value)} style={inputStyle} />
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                <label>Candidate Pool K (Default: 'auto')</label>
+                                <input type="text" value={candidatePoolK} onChange={(e) => setCandidatePoolK(e.target.value)} style={inputStyle} />
+                            </div>
+                        </div>
+                    )}
                 </>
             )}
 

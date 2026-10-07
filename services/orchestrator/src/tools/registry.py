@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from services.orchestrator.src.agent.ast_parser import CodebaseASTParser
 from services.orchestrator.src.rag.search_manager import SearchManager
@@ -11,10 +11,17 @@ logger = logging.getLogger(__name__)
 
 
 class ToolRegistry:
-    def __init__(self, uds_server=None):
+    def __init__(self, uds_server=None, config: Optional[Dict[str, Any]] = None):
         self.uds_server = uds_server
-        self.vector_store = LocalVectorStore()
-        self.search_manager = SearchManager(uds_server=uds_server, vector_store=self.vector_store)
+        self.config = config or {}
+        
+        # Reuse existing loaded LanceDB/ONNX models from server to avoid double memory footprint
+        if self.uds_server and hasattr(self.uds_server, 'vector_store'):
+            self.vector_store = self.uds_server.vector_store
+        else:
+            self.vector_store = LocalVectorStore(config=self.config)
+            
+        self.search_manager = SearchManager(uds_server=self.uds_server, vector_store=self.vector_store)
 
         self.tools = {
             "get_symbol_references": {
