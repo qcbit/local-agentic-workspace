@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.12.0...v0.13.0) (2026-10-08)
+
+
+### Features
+
+* **backend:** Add reranker to vector store and web search ([364c16b](https://github.com/qcbit/local-agentic-workspace/commit/364c16b22e4426733393c60cc7e5ebbcfede3443))
+* **backend:** Add reranker to vector store and web search ([1742c72](https://github.com/qcbit/local-agentic-workspace/commit/1742c727131f21d49d1f6e0b1224ab6bd7358070))
+
 ## [0.12.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.11.1...v0.12.0) (2026-10-05)
 
 
