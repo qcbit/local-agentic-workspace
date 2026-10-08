@@ -36,7 +36,7 @@ class Agent:
             sandbox_config=self.sandbox_config,
             max_file_read_chars=dynamic_char_limit
         )      
-        self.tool_registry = ToolRegistry(uds_server=uds_server)
+        self.tool_registry = ToolRegistry(uds_server=uds_server, config=config)
         self.max_iterations = config.get("max_iterations", 25)
         
         self.memory = SlidingContextManager(

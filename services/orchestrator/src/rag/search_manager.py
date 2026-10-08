@@ -1,22 +1,17 @@
 import asyncio
 import logging
-import tempfile
 from typing import Any, Dict, List, Optional
 import aiohttp
-import lancedb
 
 logger = logging.getLogger(__name__)
 
-
 class SearchManager:
-    """Manages tiered web search with automatic fallback and ephemeral LanceDB indexing."""
+    """Manages tiered web search with automatic fallback and cross-encoder reranking."""
 
     def __init__(self, uds_server=None, vector_store=None):
         self.uds_server = uds_server
         self.vector_store = vector_store
-        self._temp_dir = tempfile.TemporaryDirectory(prefix="agentic_web_")
-        self.db = lancedb.connect(self._temp_dir.name)
-        logger.info(f"Ephemeral web search cache initialized at {self._temp_dir.name}")
+        self.config = getattr(uds_server, 'config', {}) if uds_server else getattr(vector_store, 'config', {})
 
     async def _get_secret(self, secret_key: str) -> Optional[str]:
         """Queries VS Code's SecretStorage via UDS reverse request."""
@@ -83,7 +78,7 @@ class SearchManager:
         if not results:
             return f"Error: Web search failed across all configured providers for query: '{query}'."
 
-        # Index and rank chunks using LanceDB
+        # Rank chunks using Cross-Encoder
         return self._embed_rank_and_format(query, run_id, results, max_chars)
 
     async def _fetch_tavily(self, query: str, api_key: str) -> List[Dict[str, str]]:
@@ -158,40 +153,36 @@ class SearchManager:
         results: List[Dict[str, str]],
         max_chars: int
     ) -> str:
-        """Chunks snippets, indexes in an ephemeral table, and formats top-ranked chunks."""
-        records = []
+        """Reranks snippets and formats top-ranked chunks within the character budget."""
+        candidates = []
         for idx, item in enumerate(results):
             text = f"Title: {item['title']}\nURL: {item['url']}\n\n{item['content']}"
-            records.append({
+            candidates.append({
                 "id": f"{run_id}_{idx}",
-                "text": text,
+                "content": text,
                 "url": item["url"],
                 "title": item["title"]
             })
 
-        table_name = f"search_{run_id.replace('-', '_')}"
-        table = self.db.create_table(table_name, data=records, mode="overwrite")
+        from .reranker import get_reranker
+        reranker = get_reranker(self.config)
+        
+        if reranker:
+            candidates = reranker.rerank(query, candidates)
 
-        # If vector_store embedding is available, perform semantic search; otherwise take top results
         retrieved_texts: List[str] = []
         current_len = 0
 
-        for r in records:
-            chunk = f"### [{r['title']}]({r['url']})\n{r['text']}\n"
+        for r in candidates:
+            chunk = f"### [{r['title']}]({r['url']})\n{r['content']}\n"
             if current_len + len(chunk) > max_chars:
                 break
             retrieved_texts.append(chunk)
             current_len += len(chunk)
 
-        # Cleanup table after retrieval
-        try:
-            self.db.drop_table(table_name)
-        except Exception:
-            pass
-
         formatted = "\n---\n".join(retrieved_texts)
         return f"Web Search Results for '{query}':\n\n{formatted}"
 
     def cleanup(self):
-        """Removes the ephemeral storage directory on shutdown."""
-        self._temp_dir.cleanup()
+        """No-op. Ephemeral table storage is no longer used."""
+        pass

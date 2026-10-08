@@ -29,5 +29,15 @@
                 }
             }
         }
+    },
+    "rag": {
+        "rerank": {
+            "enabled": true,
+            "model": "BAAI/bge-reranker-base",
+            "top_k": 5,
+            "candidate_pool_k": "auto",
+            "max_latency_ms": 250,
+            "fallback_to_distance": true
+        }
     }
 }

@@ -9,12 +9,14 @@ import pyarrow as pa
 import requests
 import time
 from typing import List, Dict, Any, Optional
-from rag.semantic_chunker import SemanticChunker
+from .semantic_chunker import SemanticChunker
+from .reranker import get_reranker, detect_optimal_candidate_k
 
 
 
 class LocalVectorStore:
-    def __init__(self, workspace_root: Optional[str] = None):
+    def __init__(self, workspace_root: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
         # 1. Initialize LanceDB
         self.workspace_root = workspace_root or os.getcwd()
         db_path = os.path.join(self.workspace_root, ".lancedb") 
@@ -62,9 +64,11 @@ class LocalVectorStore:
         return self.db.open_table(self.table_name)
 
     def _generate_embedding(self, text: str) -> list[float]:
-            # FastEmbed requires a list of strings and returns a generator of NumPy arrays
-            embeddings = list(self.embedder.embed([text]))
-            return embeddings[0].tolist()
+        # FastEmbed requires a list of strings and returns a generator of NumPy arrays
+        embeddings = list(self.embedder.embed([text]))
+        emb = embeddings[0]
+        # Handle both numpy arrays (production) and standard lists (test mocks)
+        return emb.tolist() if hasattr(emb, "tolist") else emb
 
     # Inside LocalVectorStore class in vector_store.py
     def delete_file(self, file_path: str) -> int:
@@ -152,16 +156,31 @@ class LocalVectorStore:
             span.set_attribute("search.query", query)
             span.set_attribute("search.limit", limit)
 
+            reranker = get_reranker(self.config)
+            if reranker:
+                rag_config = self.config.get("rag", {}).get("rerank", {})
+                candidate_k = detect_optimal_candidate_k(rag_config.get("candidate_pool_k", "auto"))
+                candidate_k = max(limit, candidate_k)
+            else:
+                candidate_k = limit
+                
+            span.set_attribute("search.candidate_k", candidate_k)
+
             t0 = time.time()
             query_vector = self._generate_embedding(query)
             t1 = time.time()
             
-            results = self.table.search(query_vector).limit(limit).to_list()
+            results = self.table.search(query_vector).limit(candidate_k).to_list()
             t2 = time.time()
             
             embed_ms = (t1 - t0) * 1000
             db_ms = (t2 - t1) * 1000
-            logger.info(f"⏱️  FastEmbed CPU: {embed_ms:.2f}ms | ⚡ LanceDB Search: {db_ms:.2f}ms")
+            logger.info(f"⏱️  FastEmbed CPU: {embed_ms:.2f}ms | ⚡ LanceDB Search (k={candidate_k}): {db_ms:.2f}ms")
+            
+            if reranker and results:
+                results = reranker.rerank(query, results)
+                
+            results = results[:limit]
             
             span.set_attribute("latency.embedding_ms", embed_ms)
             span.set_attribute("latency.lancedb_ms", db_ms)
@@ -170,6 +189,8 @@ class LocalVectorStore:
             for i, res in enumerate(results):
                 span.set_attribute(f"result.{i}.file_path", str(res.get("file_path")))
                 span.set_attribute(f"result.{i}.distance", float(res.get("_distance", 0.0)))
+                if "_rerank_score" in res:
+                    span.set_attribute(f"result.{i}.rerank_score", float(res.get("_rerank_score")))
             
             return results
 
