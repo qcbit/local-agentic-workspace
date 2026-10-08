@@ -179,6 +179,7 @@ export class UdsClient extends EventEmitter {
                                         const result: any = await vscode.commands.executeCommand(command, rawArg, extraArg);
                                         resultPayload = typeof result === 'object' && result !== null ? result : { value: result };
                                     }
+                                    
                                     else if (command === 'vscode.openFolder') {
                                         if (!targetPath) {
                                             resultPayload = { content: `Error: No target path provided for ${command}.` };
@@ -211,7 +212,19 @@ export class UdsClient extends EventEmitter {
                                     resultPayload = { content: `Failed to execute VS Code command '${command}': ${err.message}` };
                                 }
                             }
-                            
+                            else if (msg.method === 'request_sandbox_bypass') {
+                                const { observation, tool_name } = msg.params || {};
+                                const allowBtn = "Allow (One-Time)";
+                                const denyBtn = "Deny";
+                                
+                                const userChoice = await vscode.window.showWarningMessage(
+                                    `Agent is requesting to bypass the sandbox for tool: ${tool_name}.\n\nReason: ${observation}`,
+                                    { modal: true },
+                                    allowBtn, denyBtn
+                                );
+                                
+                                resultPayload = { approved: userChoice === allowBtn };
+                            }
                             // --- TIER 3: Shell Commands (Explicit Modal) ---
                             else if (msg.method === 'request_shell_permission') {
                                 const { command } = msg.params;
