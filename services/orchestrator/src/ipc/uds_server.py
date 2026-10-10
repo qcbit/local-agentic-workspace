@@ -76,23 +76,20 @@ from services.orchestrator.src.logging.log_filter import scrub_secrets_from_stri
 from opentelemetry import trace
 tracer = trace.get_tracer(__name__)
 
-def find_auto_approve(d):
-    if isinstance(d, dict):
-        for k, v in d.items():
-            if str(k).lower() in ["auto_approve", "autoapprove"]:
-                if isinstance(v, str):
-                    return v.lower() == "true"
-                return bool(v)
-            if isinstance(v, dict):
-                res = find_auto_approve(v)
-                if res is not None:
-                    return res
-            if isinstance(v, list):
-                for item in v:
-                    res = find_auto_approve(item)
-                    if res is not None:
-                        return res
-    return None
+def extract_auto_approve(params):
+    """Extracts auto-approve flag only from the top two levels of the params dict, avoiding history blobs."""
+    if "auto_approve" in params:
+        return params["auto_approve"]
+    if "autoApprove" in params:
+        return params["autoApprove"]
+    
+    for k, v in params.items():
+        if isinstance(v, dict):
+            if "auto_approve" in v:
+                return v["auto_approve"]
+            if "autoApprove" in v:
+                return v["autoApprove"]
+    return False
 
 def setup_logging(config_data=None):
     # 1. Defaults
@@ -270,20 +267,12 @@ class JsonRpcUdsServer:
         while True:
             try:
                 file_path, file_hash, file_content = await self.sync_queue.get()
-                
-                # Create a cleaner relative path for terminal logging
-                try:
-                    short_path = os.path.relpath(file_path, workspace_root)
-                except ValueError:
-                    short_path = file_path
-                    
                 with tracer.start_as_current_span("background_sync_processing") as span:
                     span.set_attribute("queue.depth", self.sync_queue.qsize())
                     span.set_attribute("sync.file_path", file_path)
-                    
-                    logger.info(f"⏳ [Sync Worker] Start index: {short_path} (Queue depth: {self.sync_queue.qsize()})")
+                    logger.info(f"⏳ [Sync Worker] Start index: {file_path} (Queue depth: {self.sync_queue.qsize()})")
                     await asyncio.to_thread(self.vector_store.upsert_file, file_path, file_hash, file_content)
-                    logger.info(f"✅ [Sync Worker] Finish index: {short_path}")
+                    logger.info(f"✅ [Sync Worker] Finish index: {file_path}")
                 self.sync_queue.task_done()
             except asyncio.CancelledError:
                 break
@@ -463,9 +452,11 @@ class JsonRpcUdsServer:
                 if not goal:
                     return self._error_response(req_id, -32602, "Invalid params: 'goal' is required")
 
-                is_auto_approve = find_auto_approve(req)
-                if is_auto_approve is None:
-                    is_auto_approve = False
+                is_auto_approve = extract_auto_approve(params)
+                if isinstance(is_auto_approve, str):
+                    is_auto_approve = is_auto_approve.lower() == 'true'
+                else:
+                    is_auto_approve = bool(is_auto_approve)
                 if is_auto_approve:
                     logger.info("⚡ [Agent Execution] Auto-approve is enabled. Agent will execute without user confirmation.")
 
@@ -519,9 +510,11 @@ class JsonRpcUdsServer:
 
             elif method == "resume_agent_task":
                 mode = params.get("mode", "continue")
-                is_auto_approve = find_auto_approve(req)
-                if is_auto_approve is None:
-                    is_auto_approve = False
+                is_auto_approve = extract_auto_approve(params)
+                if isinstance(is_auto_approve, str):
+                    is_auto_approve = is_auto_approve.lower() == 'true'
+                else:
+                    is_auto_approve = bool(is_auto_approve)
                 
                 if not self.persistent_agent:
                     return self._error_response(req_id, -32000, "No active agent session to resume.")

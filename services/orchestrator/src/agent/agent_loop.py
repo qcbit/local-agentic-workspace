@@ -315,16 +315,41 @@ class Agent:
                         )
                         
                         if is_violation:
-                            log("🛑 [System] Sandbox violation detected. Forcing agent termination.")
-                            self.state.is_complete = True
-                            clean_error_msg = "Task aborted by system sandbox constraints. The requested action was blocked for security reasons."
-                            self.state.summary = clean_error_msg
-                            self.state.history.append(Message(role=Role.TOOL, content=self.state.summary, name="finish_task"))
+                            log("⚠️ [System] Sandbox violation detected. Requesting override from user...")
                             
-                            iter_span.set_attribute("error", True)
-                            iter_span.set_attribute("error.message", "Sandbox constraint violation")
-                            iter_span.set_status(trace.Status(trace.StatusCode.ERROR, "Sandbox constraint violation"))
-                            break
+                            bypass_approved = False
+                            if self.uds_server:
+                                bypass_res = await self.uds_server.request_client_context(
+                                    "request_sandbox_bypass",
+                                    {"tool_name": tool_name, "observation": observation}
+                                )
+                                bypass_approved = bypass_res.get("approved", False)
+                                
+                            if bypass_approved:
+                                log("✅ User approved sandbox bypass. Retrying action...")
+                                # Temporarily disable strict mode in the dispatcher for this single retry
+                                old_strict = self.dispatcher.sandbox_config.get("strict_mode", True)
+                                self.dispatcher.sandbox_config["strict_mode"] = False
+                                try:
+                                    if tool_name in dispatcher_tools:
+                                        observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=auto_approve)
+                                    else:
+                                        observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
+                                finally:
+                                    # Always restore the original security constraint immediately after
+                                    self.dispatcher.sandbox_config["strict_mode"] = old_strict
+                                is_violation = False
+                            else:
+                                log("🛑 [System] Sandbox bypass denied. Forcing agent termination.")
+                                self.state.is_complete = True
+                                clean_error_msg = "Task aborted by system sandbox constraints. The requested action was blocked for security reasons."
+                                self.state.summary = clean_error_msg
+                                self.state.history.append(Message(role=Role.TOOL, content=self.state.summary, name="finish_task"))
+                                
+                                iter_span.set_attribute("error", True)
+                                iter_span.set_attribute("error.message", "Sandbox constraint violation")
+                                iter_span.set_status(trace.Status(trace.StatusCode.ERROR, "Sandbox constraint violation"))
+                                break
 
                         if tool_name == "error" and "Connection Error" in str(llm_response.get("reasoning", "")):
                             log("🛑 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
