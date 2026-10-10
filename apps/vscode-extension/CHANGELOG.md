@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.13.0...v0.14.0) (2026-10-10)
+
+
+### Features
+
+* **security:** authorize bypass sandbox security ([d797adf](https://github.com/qcbit/local-agentic-workspace/commit/d797adf9a3e0f98b30892408f812e6cf0b8f3505))
+* **security:** authorize bypass sandbox security ([9746f16](https://github.com/qcbit/local-agentic-workspace/commit/9746f1642b227602198b8ec2752aa3cbaae0a5a7))
+
 ## [0.13.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.12.0...v0.13.0) (2026-10-08)
 
 
