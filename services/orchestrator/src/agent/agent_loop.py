@@ -16,6 +16,20 @@ from services.orchestrator.src.memory.context_manager import SlidingContextManag
 
 tracer = trace.get_tracer(__name__)
 
+
+class TokenBudgetExceededError(RuntimeError):
+    """Raised when the cumulative token counter trips the governance circuit breaker
+    so that the agent loop can be cleanly aborted and reported."""
+
+    def __init__(self, cumulative_total: int, budget: int) -> None:
+        self.cumulative_total = cumulative_total
+        self.budget = budget
+        super().__init__(
+            f"Token budget circuit breaker tripped: cumulative {cumulative_total} "
+            f"tokens exceeded the configured budget of {budget}."
+        )
+
+
 class Agent:
     def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None, workspace_root: Optional[str] = None, permission_callback=None):
         self.llm_provider = llm_provider
@@ -48,8 +62,112 @@ class Agent:
 
         self.state = AgentState(user_goal="")
 
+        # ------------------------------------------------------------------
+        # AI Governance: Token Budgets (Economic Governance)
+        # ------------------------------------------------------------------
+        # A running total of tokens consumed by THIS AGENT INSTANCE across
+        # every LLM call. When the cumulative total crosses the configured
+        # budget, `_record_token_usage` trips a circuit breaker so platform
+        # operators can see exactly when (and by which span) the limit was
+        # crossed.
+        # ------------------------------------------------------------------
+        governance_config = config.get("governance", {})
+        self.token_budget: int = int(governance_config.get("token_budget", 0))  # 0 == unlimited
+        self.cumulative_token_count: int = 0
+        self._token_call_count: int = 0
+
+    def _record_token_usage(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        span: Optional[trace.Span] = None,
+    ) -> None:
+        """Governance hook: enrich the current span with OpenInference token
+        count attributes, update the cumulative counter, and trip the circuit
+        breaker if the corporate token budget has been exceeded.
+
+        OpenInference semantic conventions: https://github.com/Arize-ai/openinference
+        - llm.token_count.prompt
+        - llm.token_count.completion
+        - llm.token_count.total
+
+        These exact span attributes are read to compute per-call cost
+        against the model pricing table configured in the workspace settings.
+        """
+        total = int(prompt_tokens) + int(completion_tokens)
+
+        # 1. Enrich the current OTLP span (Arize Phoenix shows these in the
+        #    "LLM Call" panel and uses them to compute $-cost per call).
+        active_span: trace.Span = (
+            span if span is not None
+            else trace.get_current_span()
+        )
+        if active_span.is_recording():
+            active_span.set_attribute("llm.token_count.prompt", int(prompt_tokens))
+            active_span.set_attribute("llm.token_count.completion", int(completion_tokens))
+            active_span.set_attribute("llm.token_count.total", total)
+
+        # 2. Accumulate across the agent's lifecycle (the corporate view).
+        self._token_call_count += 1
+        self.cumulative_token_count += total
+
+        # 3. Emit the running total on the same span so Phoenix can show a
+        #    trend line of cumulative consumption independent of per-call cost.
+        if active_span.is_recording():
+            active_span.set_attribute("governance.cumulative_token_count", int(self.cumulative_token_count))
+            active_span.set_attribute("governance.token_call_index", int(self._token_call_count))
+
+        logger.debug(
+            f"[Governance] LLM call #{self._token_call_count}: "
+            f"prompt={prompt_tokens}, completion={completion_tokens}, "
+            f"cumulative={self.cumulative_token_count}"
+            + (f" / budget={self.token_budget}" if self.token_budget else " / unlimited")
+        )
+
+        # 4. Circuit breaker: abort further work before we waste more budget.
+        if self.token_budget > 0 and self.cumulative_token_count > self.token_budget:
+            if active_span.is_recording():
+                active_span.set_attribute("governance.budget_exceeded", True)
+                active_span.set_attribute("governance.token_budget", int(self.token_budget))
+                active_span.set_status(
+                    trace.Status(
+                        trace.StatusCode.ERROR,
+                        f"Token budget exceeded ({self.cumulative_token_count} > {self.token_budget})",
+                    )
+                )
+            logger.warning(
+                f"⚠️ [Governance] Circuit breaker: cumulative tokens "
+                f"{self.cumulative_token_count} exceeded budget {self.token_budget}. "
+                "Aborting agent loop."
+            )
+            raise TokenBudgetExceededError(
+                cumulative_total=self.cumulative_token_count,
+                budget=self.token_budget,
+            )
+
     async def reason(self, context: List[Dict[str, str]]) -> Dict[str, Any]:
         raw_response = await asyncio.to_thread(self.llm_provider.generate, context)
+
+        # ------------------------------------------------------------------
+        # AI Governance: Token Budgets — record usage before any parsing.
+        # We estimate tokens with the same chars_per_token ratio the context
+        # manager uses (a lightweight proxy until the provider is upgraded
+        # to expose native usage metadata, at which point real counts will
+        # simply replace these estimates with zero further refactoring).
+        # ------------------------------------------------------------------
+        cptr: float = getattr(self.memory, "chars_per_token", 3.5)
+        prompt_chars = sum(len(msg.get("content", "")) for msg in context)
+        prompt_tokens = max(1, int(prompt_chars / cptr))
+        completion_tokens = max(1, int(len(raw_response or "") / cptr))
+
+        with tracer.start_as_current_span("llm_call") as llm_span:
+            llm_span.set_attribute("llm.provider", type(self.llm_provider).__name__)
+            self._record_token_usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                span=llm_span,
+            )
+
         logger.info(f"🧠 [Reasoning] LLM Output:\n{raw_response}")
 
         clean_response = raw_response.strip()
@@ -163,7 +281,8 @@ class Agent:
             my_run_id = self.state.run_id
 
             with logger.contextualize(run_id=self.state.run_id):
-                while not self.state.is_complete and not self.state.is_canceled and self.state.iterations < self.state.max_iterations:
+                budget_exhausted = False
+                while not self.state.is_complete and not self.state.is_canceled and not budget_exhausted and self.state.iterations < self.state.max_iterations:
                     with tracer.start_as_current_span(f"iteration_{self.state.iterations}") as iter_span:
                         log(f"\n[dim]🔄 --- Iteration {self.state.iterations + 1} ---[/dim]")
                         
@@ -238,7 +357,57 @@ class Agent:
                             system_prompt += "\n\nCRITIQUE REQUIRED: Review your last observations. Did your last action succeed? State your revised approach before calling the next tool."
 
                         context = self.memory.build_safe_context(self.state, system_prompt)
-                        llm_response = await self.reason(context)
+
+                        # --- AI Governance: Fold compaction overhead into cumulative budget ---
+                        # SlidingContextManager tracks tokens consumed by hidden summarization
+                        # calls. We poll and reset so these tokens count toward the circuit breaker.
+                        compaction_overhead = getattr(self.memory, "last_compaction_token_overhead", 0)
+                        if compaction_overhead > 0:
+                            self._record_token_usage(
+                                prompt_tokens=compaction_overhead,
+                                completion_tokens=0,
+                                span=iter_span,
+                            )
+                            self.memory.last_compaction_token_overhead = 0
+
+                        # --- AI Governance: Token Budget Circuit Breaker ---
+                        # `self.reason()` calls `_record_token_usage()`, which
+                        # raises `TokenBudgetExceededError` the moment the
+                        # cumulative count crosses the configured ceiling.
+                        # We catch it HERE (right at the call site) so that
+                        # the agent loop terminates cleanly, notifies the UI,
+                        # and the `iteration_N` span records the breach.
+                        try:
+                            llm_response = await self.reason(context)
+                        except TokenBudgetExceededError as tb_e:
+                            budget_exhausted = True
+                            clean_budget_msg = (
+                                f"🛑 [Governance] Agent aborted: cumulative token usage "
+                                f"({tb_e.cumulative_total}) exceeded the configured "
+                                f"budget ({tb_e.budget}). Platform operator must raise "
+                                f"the ceiling or audit the workload."
+                            )
+                            log(clean_budget_msg)
+                            self.state.is_complete = True
+                            self.state.summary = clean_budget_msg
+                            self.state.history.append(
+                                Message(
+                                    role=Role.TOOL,
+                                    content=clean_budget_msg,
+                                    name="governance_budget_breaker",
+                                )
+                            )
+                            iter_span.set_attribute("governance.budget_exceeded", True)
+                            iter_span.set_attribute("governance.cumulative_token_count", int(tb_e.cumulative_total))
+                            iter_span.set_attribute("governance.token_budget", int(tb_e.budget))
+                            iter_span.set_status(
+                                trace.Status(
+                                    trace.StatusCode.ERROR,
+                                    "Token budget circuit breaker tripped",
+                                )
+                            )
+                            break
+                        # --- end governance guard ---
 
                         if self.state.run_id != my_run_id:
                             log("👻 [Agent] Aborting orphaned ghost loop (new task started).")
@@ -358,11 +527,54 @@ class Agent:
                         self.state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name))
                         self.state.iterations += 1
 
-            if not self.state.is_complete:
+            if not self.state.is_complete and not self.state.is_canceled:
                 log("\n⚠️ --- Agent Loop Terminated (Max Iterations Reached) ---")
+
+                # ------------------------------------------------------------------
+                # AI Governance: Strict Loop Timeout (Runaway Agent Mitigation)
+                # ------------------------------------------------------------------
+                # Explicitly flag the parent trace as a failure so that Phoenix
+                # dashboards, alerting rules, and on-call runbooks can distinguish
+                # a legitimate completion from a runaway agent that was killed
+                # by the iteration guardrail.
+                # ------------------------------------------------------------------
+                if parent_span.is_recording():
+                    parent_span.set_status(
+                        trace.Status(
+                            trace.StatusCode.ERROR,
+                            f"Agent loop terminated: max_iterations ({self.state.max_iterations}) "
+                            f"reached after {self.state.iterations} iterations without completion.",
+                        )
+                    )
+                    parent_span.set_attribute("governance.termination_reason", "max_iterations_reached")
+                    parent_span.set_attribute("governance.max_iterations", int(self.state.max_iterations))
+                    parent_span.set_attribute("governance.iterations_executed", int(self.state.iterations))
+
+                    # Record cumulative token consumption at the point of kill
+                    parent_span.set_attribute("governance.cumulative_token_count_at_termination", int(self.cumulative_token_count))
+
+                self.state.summary = (
+                    f"⚠️ Agent loop terminated: max_iterations limit "
+                    f"({self.state.max_iterations}) reached. The agent was unable "
+                    f"to complete the task within the allocated iteration budget."
+                )
+
+            elif self.state.is_canceled:
+                if parent_span.is_recording():
+                    parent_span.set_status(
+                        trace.Status(
+                            trace.StatusCode.ERROR,
+                            "Agent loop was manually cancelled by the user."
+                        )
+                    )
+                    parent_span.set_attribute("governance.termination_reason", "user_cancelled")
+                log("\n🛑 --- Agent Loop Cancelled ---")
+
             else:
+                if parent_span.is_recording():
+                    parent_span.set_status(trace.Status(trace.StatusCode.OK))
                 log("\n🏁 --- Agent Loop Completed ---")
-                
+
             return self.state
 
     def is_path_authorized(self, target_path: str) -> bool:
