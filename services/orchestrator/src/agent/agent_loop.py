@@ -1,6 +1,8 @@
 import asyncio
 import json
+
 import os
+from services.orchestrator.src.llm.provider import UniversalLLMProvider
 import re
 from typing import Any, Dict, List, Optional
 import uuid
@@ -53,11 +55,74 @@ class Agent:
         self.tool_registry = ToolRegistry(uds_server=uds_server, config=config)
         self.max_iterations = config.get("max_iterations", 25)
         
+        # ------------------------------------------------------------------
+        # AI Governance: Model Routing (Phase C)
+        # ------------------------------------------------------------------
+        # The reasoning loop keeps `self.llm_provider` (flagship model).
+        # Context compaction is a low-stakes task and is routed to a smaller,
+        # faster, cheaper model selected via the optional nested
+        # `llm.compaction` block:
+        #
+        #   "llm": {
+        #     "model_name": "qwen3.8",
+        #     "endpoint_url": "...",
+        #     "api_key": "...",
+        #     "compaction": { "model_name": "qwen2.5:1.5b" }
+        #   }
+        #
+        # Inheritance rules (locked in the design session):
+        #   - `endpoint_url` and `api_key` inherit from the parent llm block
+        #     when omitted in the compaction block, so operators only change
+        #     `model_name`.
+        #   - `chars_per_token` inherits from the parent llm block when
+        #     omitted.
+        #   - If no compaction block (or no `model_name`) is present, the
+        #     SlidingContextManager keeps using the flagship provider and
+        #     behavior is identical to the pre-routing build.
+        # ------------------------------------------------------------------
+        compaction_cfg: Dict[str, Any] = llm_config.get("compaction") or {}
+        compaction_provider: Any = self.llm_provider  # default: flagship fallback
+        compaction_model_name: str = llm_config.get("model_name", "llama3:8b")
+
+        if compaction_cfg.get("model_name"):
+            compaction_endpoint: Optional[str] = (
+                compaction_cfg.get("endpoint_url") or llm_config.get("endpoint_url")
+            )
+            compaction_api_key: Optional[str] = compaction_cfg.get(
+                "api_key", llm_config.get("api_key")
+            )
+            if not compaction_endpoint:
+                logger.warning(
+                    "\U0001f4a1 [Model Routing] compaction.model_name is set but "
+                    "endpoint_url is missing in both the compaction block and the "
+                    "parent llm block. Falling back to the flagship provider for "
+                    "context compaction."
+                )
+            else:
+                compaction_provider = UniversalLLMProvider(
+                    endpoint_url=compaction_endpoint,
+                    model=compaction_cfg["model_name"],
+                    api_key=compaction_api_key,
+                    chars_per_token=float(
+                        compaction_cfg.get(
+                            "chars_per_token",
+                            llm_config.get("chars_per_token", 3.5),
+                        )
+                    ),
+                )
+                compaction_model_name = compaction_cfg["model_name"]
+                logger.info(
+                    f"\U0001f504 [Model Routing] Context compaction routed to "
+                    f"'{compaction_model_name}' "
+                    f"(chars/token={compaction_provider.chars_per_token}), "
+                    f"reasoning stays on flagship."
+                )
+
         self.memory = SlidingContextManager(
             memory_config=memory_config,
-            model_name=llm_config.get("model_name", "llama3:8b"),
-            llm_provider=self.llm_provider,
-            llm_config=llm_config
+            model_name=compaction_model_name,
+            llm_provider=compaction_provider,
+            llm_config=llm_config,  # deprecated kwarg retained for backward-compat signature
         )
 
         self.state = AgentState(user_goal="")

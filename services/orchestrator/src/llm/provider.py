@@ -9,11 +9,24 @@ logger = logging.getLogger(__name__)
 
 
 class UniversalLLMProvider:
-    """Connects the Python agent loop using the OpenAI-compatible SDK interface."""
+    """Connects the Python agent loop using the OpenAI-compatible SDK interface.
 
-    def __init__(self, endpoint_url: str, model: str, api_key: Optional[str] = None):
+    Exposes ``chars_per_token`` as a first-class property so downstream consumers
+    (e.g. the context compaction manager) can interrogate the provider instead of
+    re-parsing the config dictionary. This keeps the memory system decoupled from
+    the config parser.
+    """
+
+    def __init__(
+        self,
+        endpoint_url: str,
+        model: str,
+        api_key: Optional[str] = None,
+        chars_per_token: float = 3.5,
+    ) -> None:
         self.endpoint_url = endpoint_url
         self.model = model
+        self.chars_per_token: float = float(chars_per_token)
 
         base_url = endpoint_url.split("/chat/completions")[0].split("/responses")[0]
         proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
@@ -22,13 +35,13 @@ class UniversalLLMProvider:
         if "127.0.0.1" in endpoint_url or "localhost" in endpoint_url or "11434" in endpoint_url:
             self.client = OpenAI(base_url=base_url, api_key="ollama", http_client=http_client)
         else:
-            if "azure.com" in endpoint_url and (not api_key or api_key.lower() in ["none", "", "entra"]):
+            if "azure.com" in endpoint_url and (not api_key or api_key.lower() in ["none", ""]):
                 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
                 token_provider = get_bearer_token_provider(
                     DefaultAzureCredential(), "https://ai.azure.com/.default"
                 )
-                logger.info("🔐 Azure Entra ID authentication enabled via OpenAI SDK.")
+                logger.info("\ud83d\udd10 Azure Entra ID authentication enabled via OpenAI SDK.")
                 self.client = OpenAI(base_url=base_url, api_key=token_provider, http_client=http_client)
             else:
                 self.client = OpenAI(base_url=base_url, api_key=api_key or "sk-dummy", http_client=http_client)
@@ -48,18 +61,30 @@ class UniversalLLMProvider:
                 response = self.client.chat.completions.create(**kwargs)
                 return response.choices[0].message.content
         except Exception as e:
-            logger.error(f"❌ [SDK Connection Error] Failed to generate: {e}")
+            logger.error(f"\u274c [SDK Connection Error] Failed to generate: {e}")
             raise RuntimeError(f"LLM Provider unreachable: {e}")
 
 
 class MockLLMProvider:
-    """Mocks structured JSON generation for unit tests."""
+    """Mocks structured JSON generation for unit tests.
 
-    def __init__(self, mock_responses: List[str]):
+    Mirrors the ``UniversalLLMProvider`` introspection surface (``model`` and
+    ``chars_per_token``) so that consumers which interrogate the provider do not
+    need to distinguish real from mock providers.
+    """
+
+    def __init__(
+        self,
+        mock_responses: List[str],
+        model: str = "mock",
+        chars_per_token: float = 3.5,
+    ) -> None:
         self.mock_responses = mock_responses
         self.index = 0
+        self.model = model
+        self.chars_per_token: float = float(chars_per_token)
 
-    def generate(self, context: List[Dict[str, str]]) -> str:
+    def generate(self, context: List[Dict[str, str]], require_json: bool = True) -> str:
         if self.index < len(self.mock_responses):
             response = self.mock_responses[self.index]
             self.index += 1

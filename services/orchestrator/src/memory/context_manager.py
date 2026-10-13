@@ -1,48 +1,67 @@
-import logging
+"""Sliding window context manager with model-routed compaction.
+
+The context manager no longer accepts a ``llm_config`` dict for token-estimation
+parameters.  Instead it interrogates the assigned ``llm_provider`` for
+``chars_per_token`` and ``model``, keeping the memory layer decoupled from the
+config parser entirely.
+"""
+
 from typing import List, Dict, Any, Optional
 
+import logging
 from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
 
 logger = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)
+
+# Module-level tracer (created once at import time)
+_tracer_provider = TracerProvider()
+tracer = trace.get_tracer("context_manager", tracer_provider = _tracer_provider)
 
 
 class SlidingContextManager:
     """Manages the token window with a rolling summarization buffer."""
 
-    def __init__(self, memory_config: Dict[str, Any], model_name: str, llm_provider: Any, llm_config: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        memory_config: Dict[str, Any],
+        model_name: str,
+        llm_provider: Any,
+        llm_config: Optional[Dict[str, Any]] = None,  # deprecated; kept for call-site compat
+    ) -> None:
         self.max_tokens = memory_config.get("max_tokens", 4000)
-        self.model_name = model_name
         self.llm_provider = llm_provider
+
+        # --- Token-estimation ownership moved to the provider ---
+        # The provider exposes .chars_per_token and .model so the memory layer
+        # never needs to parse the llm config dictionary.
+        self.chars_per_token: float = float(getattr(llm_provider, "chars_per_token", 3.5))
+        self.model_name: str = getattr(llm_provider, "model", model_name or "")
 
         # Tracks the token cost of the most recent compaction event so the
         # Agent loop can fold it into its cumulative budget counter.
         # Reset to 0 by the Agent after each poll.
         self.last_compaction_token_overhead: int = 0
 
-        if llm_config and "chars_per_token" in llm_config:
-            self.chars_per_token: float = float(llm_config["chars_per_token"])
-        else:
-            # Set reasonable defaults based on common models
-            if "llama3" in model_name.lower():
-                self.chars_per_token: float = 4.0  # Llama3 typically around 4 chars/token
-            elif "qwen" in model_name.lower():
-                self.chars_per_token: float = 3.0  # Qwen models typically around 3 chars/token
-            else:
-                self.chars_per_token: float = 3.5  # Default fallback
-
-        logger.info(f"🧠 Context Manager initialized for '{model_name}' (Ratio: {self.chars_per_token} chars/token, Max: {self.max_tokens})")
+        logger.info(
+            f"\U0001f9e0 Context Manager initialized for '{self.model_name}' "
+            f"(Ratio: {self.chars_per_token} chars/token, Max: {self.max_tokens})"
+        )
 
     def _normalize_model_name(self, model_name: str) -> str:
         name = model_name.lower()
-        if "llama3" in name: return "llama3:8b"
-        if "qwen" in name: return "qwen2.5-coder"
+        if "llama3" in name:
+            return "llama3:8b"
+        if "qwen" in name:
+            return "qwen2.5-coder"
         return name
 
     def _estimate_tokens(self, text: str) -> int:
         return max(1, int(len(text) / self.chars_per_token))
 
-    def _generate_summary(self, existing_summary: str, dropped_messages: List[Any], available_tokens: int = 0) -> str:
+    def _generate_summary(
+        self, existing_summary: str, dropped_messages: List[Any], available_tokens: int = 0
+    ) -> str:
         """Calls the LLM in plain-text mode to summarize the dropped history.
 
         Wraps the LLM call in a dedicated ``context_compaction`` OpenTelemetry span
@@ -50,8 +69,13 @@ class SlidingContextManager:
 
         OpenInference semantic conventions are applied:
         https://github.com/Arize-ai/openinference
+
+        The ``llm.task`` attribute is set to ``context_compaction`` so that
+        Phoenix dashboards can split reasoning vs. compaction spend.
         """
-        dropped_text = "\n".join([f"{msg.role}: {msg.content}" for msg in dropped_messages])
+        dropped_text = "\n".join(
+            f"{msg.role}: {msg.content}" for msg in dropped_messages
+        )
 
         prompt = (
             "You are a system memory compressor. Your task is to update a running summary "
@@ -68,13 +92,18 @@ class SlidingContextManager:
         prompt_tokens = self._estimate_tokens(prompt)
 
         with tracer.start_as_current_span("context_compaction") as compaction_span:
+            # --- Task routing label (Phase B decision #4) ---
+            compaction_span.set_attribute("llm.task", "context_compaction")
+
             # --- Identity & mechanism ---
             compaction_span.set_attribute("compaction.mechanism", "sliding_window")
             compaction_span.set_attribute("compaction.messages_dropped", len(dropped_messages))
             compaction_span.set_attribute("compaction.available_tokens_before", int(available_tokens))
             compaction_span.set_attribute("compaction.max_window_tokens", int(self.max_tokens))
             compaction_span.set_attribute("llm.provider", type(self.llm_provider).__name__)
-            compaction_span.set_attribute("llm.model_family", self._normalize_model_name(self.model_name))
+            compaction_span.set_attribute(
+                "llm.model_family", self._normalize_model_name(self.model_name)
+            )
 
             try:
                 response = self.llm_provider.generate(context, require_json=False).strip()
@@ -123,7 +152,7 @@ class SlidingContextManager:
         # 1. Pin the Core Prompts
         core_context = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": state.user_goal}
+            {"role": "user", "content": state.user_goal},
         ]
         core_tokens = sum(self._estimate_tokens(msg["content"]) for msg in core_context)
 
@@ -131,7 +160,9 @@ class SlidingContextManager:
         summary_context = []
         summary_tokens = 0
         if state.summary:
-            summary_context = [{"role": "system", "content": f"Summary of earlier actions:\n{state.summary}"}]
+            summary_context = [
+                {"role": "system", "content": f"Summary of earlier actions:\n{state.summary}"}
+            ]
             summary_tokens = self._estimate_tokens(summary_context[0]["content"])
 
         available_tokens = self.max_tokens - core_tokens - summary_tokens
@@ -143,10 +174,13 @@ class SlidingContextManager:
 
         for msg in reversed(state.history):
             content = msg.content
-            role_str = msg.role.value if hasattr(msg.role, 'value') else str(msg.role)
+            role_str = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
 
             if role_str == "tool":
-                content = f"Tool '{msg.name}' Observation:\n{msg.content}\n\nWhat is your next action?"
+                content = (
+                    f"Tool '{msg.name}' Observation:\n{msg.content}\n\n"
+                    "What is your next action?"
+                )
                 mapped_role = "user"
             else:
                 mapped_role = role_str
@@ -162,11 +196,10 @@ class SlidingContextManager:
 
         # 4. Handle dropped messages by generating a new summary
         if dropped_history:
-            logger.info(f"Context limit reached. Summarizing and dropping {len(dropped_history)} old messages...")
+            logger.info(
+                f"Context limit reached. Summarizing and dropping {len(dropped_history)} old messages..."
+            )
 
-            # The span, token accounting, and governance attributes are all
-            # handled internally by _generate_summary() using the EXACT prompt
-            # string, eliminating duplication/drift risk.
             new_summary = self._generate_summary(
                 state.summary, dropped_history, available_tokens=int(available_tokens)
             )
@@ -178,6 +211,8 @@ class SlidingContextManager:
             state.history = [msg for msg in state.history if msg not in dropped_history]
 
             # Rebuild the summary block for this current injection
-            summary_context = [{"role": "system", "content": f"Summary of earlier actions:\n{state.summary}"}]
+            summary_context = [
+                {"role": "system", "content": f"Summary of earlier actions:\n{state.summary}"}
+            ]
 
         return core_context + summary_context + retained_history
