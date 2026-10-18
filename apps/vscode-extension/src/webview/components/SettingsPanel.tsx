@@ -220,7 +220,7 @@ export const SettingsPanel: React.FC = () => {
                         endpoint_url: endpointUrl,
                         api_key: apiKey,
                         model_name: modelName,
-                        models_path: modelsPath,
+                        models_path: modelsPath.replace(/\\/g, '/'),
                         chars_per_token: charsPerToken
                     },
                     memory: { 
@@ -228,7 +228,10 @@ export const SettingsPanel: React.FC = () => {
                     },
                     sandbox: {
                         strict_mode: strictMode,
-                        allowed_external_paths: allowedExternalPaths.split('\n').map(p => p.trim()).filter(p => p !== '')
+                        allowed_external_paths: allowedExternalPaths
+                            .split('\n')
+                            .map(p => p.trim().replace(/\\/g, '/')) // Normalize Windows paths
+                            .filter(p => p !== '')
                     },
                     logging: {
                         level: logLevel,

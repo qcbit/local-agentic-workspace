@@ -18,6 +18,11 @@
                 "models_path": "~/.ollama/models/manifests/registry.ollama.ai/library",
                 "chars_per_token": 4
             },
+            "compaction": {
+                "model_name": "qwen2.5:1.5b",
+                "endpoint_url": "http://127.0.0.1:11434/v1/chat/completions"
+                }
+            },
             "memory": {
                 "max_tokens": 240000
             },
