@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.14.0...v0.14.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **Settings:** Sanitize Windows path to fix sync issue with config. ([31d17a8](https://github.com/qcbit/local-agentic-workspace/commit/31d17a8484abec5579b9606804e625e6a8f48eb0))
+* **Settings:** Sanitize Windows path to fix sync issue with config. ([08a7293](https://github.com/qcbit/local-agentic-workspace/commit/08a7293f3f48ed7ac03144209ec7a014ce6bdaf0))
+
 ## [0.14.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.13.0...v0.14.0) (2026-10-10)
 
 
