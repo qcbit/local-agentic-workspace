@@ -191,6 +191,17 @@ export const ChatPanel: React.FC = () => {
         setMessages(prev => [...prev, { role: 'error', content: '🛑 Agent task forcefully aborted.' }]);
     };
 
+    const handleToggleAutoApprove = () => {
+        const newState = !isAutoApprove;
+        setIsAutoApprove(newState);
+        
+        // Send the message to the VS Code extension host
+        vscode.postMessage({
+            command: 'toggleAutoApprove',
+            enabled: newState
+        });
+    };
+
     const filteredSessions = sessions.filter(s => 
         s.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
         s.messages.some(m => m.content.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -303,15 +314,25 @@ export const ChatPanel: React.FC = () => {
             )}
             
             <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', borderTop: '1px solid var(--vscode-widget-border)', alignItems: 'flex-end' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-foreground)', fontSize: '12px', cursor: 'pointer', paddingBottom: '8px' }}>
-                    <input 
-                        type="checkbox" 
-                        checked={isAutoApprove}
-                        onChange={(e) => setIsAutoApprove(e.target.checked)}
-                        style={{ margin: 0 }}
-                    />
-                    Auto-Approve
-                </label>
+                <button 
+                    onClick={handleToggleAutoApprove}
+                    title={isAutoApprove ? "Auto-Approve is ON. The agent will not ask for permission." : "Auto-Approve is OFF. The agent will pause for permission."}
+                    style={{
+                        padding: '6px 12px',
+                        backgroundColor: isAutoApprove ? 'var(--vscode-testing-iconPassed)' : 'var(--vscode-button-secondaryBackground)',
+                        color: isAutoApprove ? '#fff' : 'var(--vscode-button-secondaryForeground)',
+                        border: '1px solid var(--vscode-widget-border)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        borderRadius: '4px',
+                        fontWeight: 'bold',
+                        marginBottom: '8px'
+                    }}
+                >
+                    {isAutoApprove ? '⚡ Auto-Approve: ON' : '🛡️ Auto-Approve: OFF'}
+                </button>
             </div>
                 
             <div style={{ display: 'flex', gap: '8px', paddingTop: '10px', alignItems: 'flex-end' }}>

@@ -87,6 +87,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'resume_task':
                     await this._resumeTask(data.mode, data.autoApprove ?? false);
                     break;
+                case 'toggleAutoApprove':
+                    if (this._udsClient) {
+                        this._udsClient.setAutoApprove(data.enabled)
+                            .then(response => {
+                                console.log("Auto-approve updated:", response);
+                                // Optionally notify the UI that the state changed successfully
+                                webviewView.webview.postMessage({ 
+                                    command: 'autoApproveUpdated', 
+                                    enabled: data.enabled 
+                                });
+                            })
+                            .catch(err => console.error("Failed to toggle auto-approve:", err));
+                    }
+                    break;
             }
         });
     }

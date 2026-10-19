@@ -545,6 +545,14 @@ class JsonRpcUdsServer:
                     "final_observation": final_observation
                 })
 
+            elif method == "set_auto_approve":
+                if not self.persistent_agent:
+                    return self._error_response(req_id, -32000, "No active agent session.")
+                
+                new_state = extract_auto_approve(params)
+                self.persistent_agent.auto_approve = new_state
+                logger.info(f"⚙️ Mid-task auto-approve set to: {new_state}")
+                return self._success_response(req_id, {"status": "success", "auto_approve": new_state})
             elif method == "update_config":
                 res = self.handle_update_config(params)
                 if "error" in res:

@@ -39,6 +39,7 @@ class Agent:
         self.workspace_root = workspace_root or os.getcwd()
         self.sandbox_config = config.get("sandbox", {})
         self.search_config = config.get("search", {})
+        self.auto_approve = False
         
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
@@ -268,6 +269,7 @@ class Agent:
         history_payload: list = None
     ) -> AgentState:
         with tracer.start_as_current_span("agent_execution_loop") as parent_span:
+            self.auto_approve = auto_approve
             def log(msg: str):
                 if ui_callback:
                     ui_callback(msg)
@@ -532,7 +534,7 @@ class Agent:
                         if tool_name not in self.tool_registry.tools and tool_name != "finish_task":
                             observation = f"Error: Tool '{tool_name}' is disabled or not recognized in this workflow."
                         elif tool_name in dispatcher_tools:
-                            observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=auto_approve)
+                            observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=self.auto_approve)
                         else:
                             if tool_name == "web_search":
                                 tool_args["run_id"] = self.state.run_id

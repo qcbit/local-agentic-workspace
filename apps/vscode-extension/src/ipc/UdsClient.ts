@@ -398,4 +398,11 @@ export class UdsClient extends EventEmitter {
     public cancelTask(): void {
         this.sendNotification("cancel_agent_task", {});
     }
+
+    /**
+     * Toggles mid-task auto-approval on the persistent agent.
+     */
+    public setAutoApprove(enabled: boolean): Promise<any> {
+        return this.request("set_auto_approve", { auto_approve: enabled });
+    }
 }
