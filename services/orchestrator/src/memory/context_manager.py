@@ -14,9 +14,7 @@ from opentelemetry.sdk.trace import TracerProvider
 
 logger = logging.getLogger(__name__)
 
-# Module-level tracer (created once at import time)
-_tracer_provider = TracerProvider()
-tracer = trace.get_tracer("context_manager", tracer_provider = _tracer_provider)
+tracer = trace.get_tracer(__name__)
 
 
 class SlidingContextManager:
