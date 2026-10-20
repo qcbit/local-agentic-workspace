@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.15.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.14.1...v0.15.0) (2026-10-20)
+
+
+### Features
+
+* **Agent:** User inject message to active session ([e5a6599](https://github.com/qcbit/local-agentic-workspace/commit/e5a65998110fde96d7f01dcd5a231d8b08432ea3))
+* **UX:** Inject user input ([4d3aeec](https://github.com/qcbit/local-agentic-workspace/commit/4d3aeec86c8bcc7911fd2277ef2c4de3cbb047ea))
+* **UX:** Toggle auto-approve ([80e8289](https://github.com/qcbit/local-agentic-workspace/commit/80e828986949c21f233f621dad5ee34b3a81cd02))
+
 ## [0.14.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.14.0...v0.14.1) (2026-10-18)
 
 
