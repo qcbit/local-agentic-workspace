@@ -405,4 +405,11 @@ export class UdsClient extends EventEmitter {
     public setAutoApprove(enabled: boolean): Promise<any> {
         return this.request("set_auto_approve", { auto_approve: enabled });
     }
+
+    /**
+     * Injects a mid-task guidance message into the agent's queue.
+     */
+    public injectMessage(message: string): Promise<any> {
+        return this.request("inject_message", { message: message });
+    }
 }

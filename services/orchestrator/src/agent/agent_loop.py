@@ -40,6 +40,7 @@ class Agent:
         self.sandbox_config = config.get("sandbox", {})
         self.search_config = config.get("search", {})
         self.auto_approve = False
+        self.user_inbox = asyncio.Queue()
         
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
@@ -352,6 +353,13 @@ class Agent:
                 while not self.state.is_complete and not self.state.is_canceled and not budget_exhausted and self.state.iterations < self.state.max_iterations:
                     with tracer.start_as_current_span(f"iteration_{self.state.iterations}") as iter_span:
                         log(f"\n[dim]🔄 --- Iteration {self.state.iterations + 1} ---[/dim]")
+
+                        # --- HITL: Drain Mid-Task User Input ---
+                        while not self.user_inbox.empty():
+                            injected_msg = self.user_inbox.get_nowait()
+                            formatted_guidance = f"⚠️ [User Input Interjected]: {injected_msg}"
+                            self.state.history.append(Message(role=Role.USER, content=formatted_guidance))
+                            log(f"📥 [System] Injected user input into context window.")
                         
                         tool_descriptions = "\n".join([f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()])
 

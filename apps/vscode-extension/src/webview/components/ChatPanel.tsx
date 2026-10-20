@@ -165,6 +165,25 @@ export const ChatPanel: React.FC = () => {
         }
     };
 
+    const handleInject = () => {
+        if (!input.trim()) return;
+        
+        // Add the message to the UI instantly so the user sees it
+        const injectedText = `⚠️ [User Guidance Interjected]: ${input}`;
+        setMessages(prev => [...prev, { role: 'user', content: injectedText }]);
+        setIsAutoScrollEnabled(true);
+        
+        vscode.postMessage({
+            command: 'injectMessage',
+            text: input
+        });
+        
+        setInput('');
+        if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto';
+        }
+    };
+
     const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
         setInput(e.target.value);
         if (textareaRef.current) {
@@ -178,7 +197,11 @@ export const ChatPanel: React.FC = () => {
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault(); 
-            handleSend();
+            if (isLoading) {
+                handleInject();
+            } else {
+                handleSend();
+            }
         }
     };
 
@@ -360,12 +383,22 @@ export const ChatPanel: React.FC = () => {
                 />
                 
                 {isLoading ? (
-                    <button 
-                        onClick={handleStopAgent}
-                        style={{ padding: '8px 12px', backgroundColor: '#d32f2f', color: 'white', border: 'none', cursor: 'pointer', marginBottom: '2px', borderRadius: '2px' }}
-                    >
-                        🛑 Stop
-                    </button>
+                    <>
+                        {input.trim() && (
+                            <button 
+                                onClick={handleInject}
+                                style={{ padding: '8px 12px', backgroundColor: '#d97706', color: 'white', border: 'none', cursor: 'pointer', marginBottom: '2px', borderRadius: '2px', marginRight: '4px' }}
+                            >
+                                ⚡ Inject
+                            </button>
+                        )}
+                        <button 
+                            onClick={handleStopAgent}
+                            style={{ padding: '8px 12px', backgroundColor: '#d32f2f', color: 'white', border: 'none', cursor: 'pointer', marginBottom: '2px', borderRadius: '2px' }}
+                        >
+                            🛑 Stop
+                        </button>
+                    </>
                 ) : (
                     <button 
                         onClick={handleSend}

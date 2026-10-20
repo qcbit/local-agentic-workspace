@@ -101,6 +101,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                             .catch(err => console.error("Failed to toggle auto-approve:", err));
                     }
                     break;
+                case 'injectMessage':
+                    if (this._udsClient) {
+                        this._udsClient.injectMessage(data.text)
+                            .then(response => {
+                                console.log("Message injected on backend:", response);
+                            })
+                            .catch(err => console.error("Failed to inject message:", err));
+                    }
+                    break;
             }
         });
     }

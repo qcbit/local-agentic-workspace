@@ -553,6 +553,15 @@ class JsonRpcUdsServer:
                 self.persistent_agent.auto_approve = new_state
                 logger.info(f"⚙️ Mid-task auto-approve set to: {new_state}")
                 return self._success_response(req_id, {"status": "success", "auto_approve": new_state})
+            elif method == "inject_message":
+                if not self.persistent_agent:
+                    return self._error_response(req_id, -32000, "No active agent session.")
+                
+                user_input = params.get("message", "").strip()
+                if user_input:
+                    self.persistent_agent.user_inbox.put_nowait(user_input)
+                    logger.info(f"📥 Mid-task user input received: {user_input}")
+                return self._success_response(req_id, {"status": "queued"})
             elif method == "update_config":
                 res = self.handle_update_config(params)
                 if "error" in res:
