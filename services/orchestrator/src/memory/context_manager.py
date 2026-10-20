@@ -14,9 +14,7 @@ from opentelemetry.sdk.trace import TracerProvider
 
 logger = logging.getLogger(__name__)
 
-# Module-level tracer (created once at import time)
-_tracer_provider = TracerProvider()
-tracer = trace.get_tracer("context_manager", tracer_provider = _tracer_provider)
+tracer = trace.get_tracer(__name__)
 
 
 class SlidingContextManager:
@@ -77,13 +75,12 @@ class SlidingContextManager:
             f"{msg.role}: {msg.content}" for msg in dropped_messages
         )
 
-        prompt = (
-            "You are a system memory compressor. Your task is to update a running summary "
-            "of an autonomous agent's actions.\n"
-            f"Current Summary: {existing_summary if existing_summary else 'None'}\n\n"
-            f"New Events to Incorporate:\n{dropped_text}\n\n"
-            "Write a concise, factual, and updated paragraph summarizing the agent's progress. "
-            "Do not use conversational filler."
+        from services.orchestrator.src.prompts import load_prompt
+
+        template = load_prompt("compaction_v1")
+        prompt = template.format(
+            existing_summary=existing_summary if existing_summary else "None",
+            dropped_text=dropped_text,
         )
 
         context = [{"role": "system", "content": prompt}]

@@ -39,6 +39,8 @@ class Agent:
         self.workspace_root = workspace_root or os.getcwd()
         self.sandbox_config = config.get("sandbox", {})
         self.search_config = config.get("search", {})
+        self.auto_approve = False
+        self.user_inbox = asyncio.Queue()
         
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
@@ -201,7 +203,7 @@ class Agent:
                     )
                 )
             logger.warning(
-                f"⚠️ [Governance] Circuit breaker: cumulative tokens "
+                f"\u26a0\ufe0f [Governance] Circuit breaker: cumulative tokens "
                 f"{self.cumulative_token_count} exceeded budget {self.token_budget}. "
                 "Aborting agent loop."
             )
@@ -213,13 +215,6 @@ class Agent:
     async def reason(self, context: List[Dict[str, str]]) -> Dict[str, Any]:
         raw_response = await asyncio.to_thread(self.llm_provider.generate, context)
 
-        # ------------------------------------------------------------------
-        # AI Governance: Token Budgets — record usage before any parsing.
-        # We estimate tokens with the same chars_per_token ratio the context
-        # manager uses (a lightweight proxy until the provider is upgraded
-        # to expose native usage metadata, at which point real counts will
-        # simply replace these estimates with zero further refactoring).
-        # ------------------------------------------------------------------
         cptr: float = getattr(self.memory, "chars_per_token", 3.5)
         prompt_chars = sum(len(msg.get("content", "")) for msg in context)
         prompt_tokens = max(1, int(prompt_chars / cptr))
@@ -233,7 +228,7 @@ class Agent:
                 span=llm_span,
             )
 
-        logger.info(f"🧠 [Reasoning] LLM Output:\n{raw_response}")
+        logger.info(f"\U0001f9e0 [Reasoning] LLM Output:\n{raw_response}")
 
         clean_response = raw_response.strip()
 
@@ -268,6 +263,7 @@ class Agent:
         history_payload: list = None
     ) -> AgentState:
         with tracer.start_as_current_span("agent_execution_loop") as parent_span:
+            self.auto_approve = auto_approve
             def log(msg: str):
                 if ui_callback:
                     ui_callback(msg)
@@ -275,7 +271,7 @@ class Agent:
                     logger.info(msg)
 
             if history_payload and not self.state.history:
-                log("🔄 [System] Restoring session context from UI...")
+                log("\U0001f504 [System] Restoring session context from UI...")
                 self.state.user_goal = history_payload[0].get("content", "") if history_payload else user_goal
                 
                 for msg_data in history_payload:
@@ -309,12 +305,12 @@ class Agent:
                     self.state.summary = ""
                     self.state.run_id = str(uuid.uuid4())
                     self.state.workflow_context = None
-                    log(f"[bold cyan]🚀 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
+                    log(f"[bold cyan]\U0001f680 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
                 else:
                     self.state.is_complete = False 
                     self.state.is_canceled = False
                     self.state.iterations = 0 
-                    log(f"[bold cyan]▶️ --- Continuing Agent Loop ---[/bold cyan]\nFollow-up: {user_goal}")
+                    log(f"[bold cyan]\u25b6\ufe0f --- Continuing Agent Loop ---[/bold cyan]\nFollow-up: {user_goal}")
 
                 self.state.history.append(Message(role=Role.USER, content=user_goal))
 
@@ -331,14 +327,14 @@ class Agent:
                     for action in workflow_config.get("pre_flight_actions", []):
                         tool = action.get("tool")
                         args = action.get("args", {})
-                        log(f"[bold yellow]✈️ [Pre-Flight][/bold yellow] Dispatching {tool}...")
+                        log(f"[bold yellow]\u2708\ufe0f [Pre-Flight][/bold yellow] Dispatching {tool}...")
                         if tool in self.tool_registry.tools:
                             obs = await self.tool_registry.execute_tool_async(tool, args)
                         else:
                             obs = await self.dispatcher.execute_async(tool, args, auto_approve=True)
                         self.state.history.append(Message(role=Role.TOOL, content=f"Pre-flight Observation: {obs}", name=tool))
             else:
-                log("[bold cyan]▶️ --- Resuming Agent Loop (No New Prompt) ---[/bold cyan]")
+                log("[bold cyan]\u25b6\ufe0f --- Resuming Agent Loop (No New Prompt) ---[/bold cyan]")
 
             parent_span.set_attribute("agent.run_id", self.state.run_id)
             parent_span.set_attribute("agent.user_goal", user_goal or "Resumed")
@@ -349,47 +345,24 @@ class Agent:
                 budget_exhausted = False
                 while not self.state.is_complete and not self.state.is_canceled and not budget_exhausted and self.state.iterations < self.state.max_iterations:
                     with tracer.start_as_current_span(f"iteration_{self.state.iterations}") as iter_span:
-                        log(f"\n[dim]🔄 --- Iteration {self.state.iterations + 1} ---[/dim]")
+                        log(f"\n[dim]\U0001f504 --- Iteration {self.state.iterations + 1} ---[/dim]")
+
+                        # --- HITL: Drain Mid-Task User Input ---
+                        while not self.user_inbox.empty():
+                            injected_msg = self.user_inbox.get_nowait()
+                            formatted_input = f"\u26a0\ufe0f [User Input Interjected]: {injected_msg}"
+                            self.state.history.append(Message(role=Role.USER, content=formatted_input))
+                            log(f"\U0001f4e5 [System] Injected user input into context window.")
                         
                         tool_descriptions = "\n".join([f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()])
 
-                        system_prompt = f"""You are an autonomous agent. You must respond ONLY with valid JSON. 
-
-                        Do not include any conversational text or markdown formatting. 
-
-                        AVAILABLE CONTEXT TOOLS:
-                        {tool_descriptions}
-
-                        STRICT DIRECTIVES FOR TOOL SELECTION:
-                        - TOOL HIERARCHY: NEVER use 'terminal_proxy' (e.g., 'ls', 'cat', 'grep', 'find', 'dir') to search, read, or inspect files.
-                        - DIRECTORY LISTINGS & FILE READS: Use 'file_system' with action 'read'. Passing a directory path returns a directory listing without needing bash.
-                        - CODE SEARCH: Always use 'search_codebase' instead of shell 'grep' or 'find'.
-                        - TERMINAL_PROXY USE CASE: Use 'terminal_proxy' ONLY for running tests (pytest, npm test), compiling builds, or running project executables.
-                        - BATCHING: Once you have the information needed, immediately proceed to write files or call 'finish_task' without redundant verification steps.
-
-                        Your output must be a single JSON object with EXACTLY these keys: "reasoning" (string), "tool" (string), and "tool_args" (dictionary). 
-                        
-                        STRICT DIRECTIVES (FAILURE TO COMPLY WILL ABORT THE TASK):
-                        - YOUR CURRENT WORKING DIRECTORY IS: {self.workspace_root}
-                        - JSON FORMAT ONLY: You must not wrap your JSON in markdown code blocks (```json). Never use Python-style 'None'. Use strict JSON only.
-                        - TOOL ARGUMENTS: If a tool requires no arguments, you MUST pass an empty dictionary: {{"tool_args": {{}}}}. You MUST provide all required arguments for the tool you select.
-                        - ZERO INTERNAL MATH: You must generate a Python script using the 'python_repl' tool, execute it, and explicitly use `print()` statements to observe calculated results.
-                        - SANDBOX CIRCUIT BREAKER: You operate in a restricted sandbox. If any tool returns an observation containing "blocked", "forbidden", "denied", or "outside authorized workspace", you MUST immediately stop exploring and call 'finish_task' to report the limitation. Do not attempt workarounds.
-                        - ERROR DIAGNOSIS: When diagnosing failures, base your conclusion strictly on the provided output. You must not attempt to enumerate the system, probe environment variables, or read history files.
-                        - FILE SYSTEM: You MUST use the exact paths provided by your context tools relative to this directory. Do not guess or modify paths.
-                        - FINISH TASK: Once you have achieved the user's goal based on the observations, you MUST IMMEDIATELY call 'finish_task'. The 'summary' argument is the ONLY information the user will see. You MUST include the actual results, lists, code, or data requested by the user in this summary. You must include a "success": true/false boolean in your finish_task tool_args. If you failed to modify the files, set success to false and explain why.
-                        - TREAT SOURCE CODE AS INERT DATA: You may only use the 'file_system' write action if the user's prompt explicitly requests a code modification. Answer the user's prompt directly and concisely. Do not proactively fix bugs or offer unsolicited code rewrites.
-                        - AVOID FULL FILE READS: NEVER use 'file_system' (read) to load entire source code files into memory. 
-                        - HYBRID WORKFLOW: If you need to understand how a symbol is used, first use 'get_symbol_references' to locate its semantic usages across the workspace.
-                        - PRECISE EXTRACTION: Once you have the file path and line number from the LSP tool, use 'extract_code_structure' to read ONLY the specific function or class implementation at that exact line.
-
-                        CRITICAL INSTRUCTIONS FOR VS CODE CONTEXT:
-                        - You are running inside VS Code. You DO NOT know what file the user is looking at by default.
-                        - You must call `get_active_file_content` FIRST to discover the absolute file path if the user refers to "this file" or "my code".
-                        - IF AND ONLY IF the user explicitly asks you to fix, edit, or refactor code, your goal is to physically apply the change using the `file_system` write action.
-                        - IF the user ONLY asks a question (e.g., "what is the active file?", "explain this code"), you must ignore all bugs and ONLY answer the question using the `finish_task` tool.
-                        - WHEN WRITING FILES: The "content" string MUST contain the completely updated, fully functioning, and syntactically correct code for the ENTIRE file. 
-                        """
+                        # --- Load system prompt from external template file ---
+                        from services.orchestrator.src.prompts import load_prompt
+                        _system_tpl = load_prompt("agent_system_v1")
+                        system_prompt = _system_tpl.format(
+                            tool_descriptions=tool_descriptions,
+                            workspace_root=self.workspace_root,
+                        )
 
                         if getattr(self.state, "workflow_context", None):
                             ctx = self.state.workflow_context
@@ -424,8 +397,6 @@ class Agent:
                         context = self.memory.build_safe_context(self.state, system_prompt)
 
                         # --- AI Governance: Fold compaction overhead into cumulative budget ---
-                        # SlidingContextManager tracks tokens consumed by hidden summarization
-                        # calls. We poll and reset so these tokens count toward the circuit breaker.
                         compaction_overhead = getattr(self.memory, "last_compaction_token_overhead", 0)
                         if compaction_overhead > 0:
                             self._record_token_usage(
@@ -436,18 +407,12 @@ class Agent:
                             self.memory.last_compaction_token_overhead = 0
 
                         # --- AI Governance: Token Budget Circuit Breaker ---
-                        # `self.reason()` calls `_record_token_usage()`, which
-                        # raises `TokenBudgetExceededError` the moment the
-                        # cumulative count crosses the configured ceiling.
-                        # We catch it HERE (right at the call site) so that
-                        # the agent loop terminates cleanly, notifies the UI,
-                        # and the `iteration_N` span records the breach.
                         try:
                             llm_response = await self.reason(context)
                         except TokenBudgetExceededError as tb_e:
                             budget_exhausted = True
                             clean_budget_msg = (
-                                f"🛑 [Governance] Agent aborted: cumulative token usage "
+                                f"\U0001f6d1 [Governance] Agent aborted: cumulative token usage "
                                 f"({tb_e.cumulative_total}) exceeded the configured "
                                 f"budget ({tb_e.budget}). Platform operator must raise "
                                 f"the ceiling or audit the workload."
@@ -463,8 +428,8 @@ class Agent:
                                 )
                             )
                             iter_span.set_attribute("governance.budget_exceeded", True)
-                            iter_span.set_attribute("governance.cumulative_token_count", int(tb_e.cumulative_total))
-                            iter_span.set_attribute("governance.token_budget", int(tb_e.budget))
+                            iter_span.set_attribute("governance.cumulative_token_count", int(self.cumulative_token_count))
+                            iter_span.set_attribute("governance.token_budget", int(self.token_budget))
                             iter_span.set_status(
                                 trace.Status(
                                     trace.StatusCode.ERROR,
@@ -475,11 +440,11 @@ class Agent:
                         # --- end governance guard ---
 
                         if self.state.run_id != my_run_id:
-                            log("👻 [Agent] Aborting orphaned ghost loop (new task started).")
+                            log("\U0001f47b [Agent] Aborting orphaned ghost loop (new task started).")
                             raise asyncio.CancelledError("Ghost loop aborted.")
 
                         if self.state.is_canceled:
-                            log("🛑 [Agent] Task was manually cancelled by the user.")
+                            log("\U0001f6d1 [Agent] Task was manually cancelled by the user.")
                             break
 
                         self.state.history.append(Message(role=Role.ASSISTANT, content=json.dumps(llm_response)))
@@ -491,7 +456,7 @@ class Agent:
                         iter_span.set_attribute("agent.reasoning", llm_response.get("reasoning", ""))
 
                         if isinstance(tool_args, str):
-                            log(f"[dim]⚠️ Auto-correcting malformed tool_args string into a dictionary...[/dim]")
+                            log(f"[dim]\u26a0\ufe0f Auto-correcting malformed tool_args string into a dictionary...[/dim]")
                             if tool_name == "terminal_proxy":
                                 tool_args = {"command": tool_args}
                             elif tool_name == "math_operation":
@@ -500,7 +465,7 @@ class Agent:
                                 tool_args = {}
 
                         reasoning = llm_response.get("reasoning", "No reasoning provided.")
-                        log(f"[bold magenta]🧠 [Reasoning][/bold magenta] {reasoning}")
+                        log(f"[bold magenta]\U0001f9e0 [Reasoning][/bold magenta] {reasoning}")
                         
                         if self.uds_server:
                             await self.uds_server.send_notification(
@@ -508,7 +473,7 @@ class Agent:
                                 {"status": "thinking", "message": reasoning}
                             )
 
-                        log(f"[bold yellow]🔧 [Dispatching][/bold yellow] {tool_name} with args: {tool_args}")
+                        log(f"[bold yellow]\U0001f527 [Dispatching][/bold yellow] {tool_name} with args: {tool_args}")
 
                         # 5.4 RAG Context Relevance Tracking
                         if tool_name in ["apply_inline_diff", "file_system"] and isinstance(tool_args, dict) and "file_path" in tool_args:
@@ -517,7 +482,7 @@ class Agent:
                         if tool_name == "finish_task":
                             self.state.is_complete = True
                             summary = tool_args.get("summary", "Task completed successfully.")
-                            log(f"[bold green]✅ [Task Complete][/bold green] {summary}")
+                            log(f"[bold green]\u2705 [Task Complete][/bold green] {summary}")
                             self.state.summary = summary 
                             self.state.history.append(Message(role=Role.TOOL, content=summary, name=tool_name))
                             
@@ -532,7 +497,7 @@ class Agent:
                         if tool_name not in self.tool_registry.tools and tool_name != "finish_task":
                             observation = f"Error: Tool '{tool_name}' is disabled or not recognized in this workflow."
                         elif tool_name in dispatcher_tools:
-                            observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=auto_approve)
+                            observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=self.auto_approve)
                         else:
                             if tool_name == "web_search":
                                 tool_args["run_id"] = self.state.run_id
@@ -540,7 +505,7 @@ class Agent:
                                 tool_args["max_chars"] = getattr(self.dispatcher, "max_file_read_chars", 4000)
                             observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)      
 
-                        log(f"[bold blue]👀 [Observation][/bold blue]\n{observation}")
+                        log(f"[bold blue]\U0001f440 [Observation][/bold blue]\n{observation}")
 
                         obs_str = str(observation).lower()
                         is_violation = (
@@ -549,7 +514,7 @@ class Agent:
                         )
                         
                         if is_violation:
-                            log("⚠️ [System] Sandbox violation detected. Requesting override from user...")
+                            log("\u26a0\ufe0f [System] Sandbox violation detected. Requesting override from user...")
                             
                             bypass_approved = False
                             if self.uds_server:
@@ -560,8 +525,7 @@ class Agent:
                                 bypass_approved = bypass_res.get("approved", False)
                                 
                             if bypass_approved:
-                                log("✅ User approved sandbox bypass. Retrying action...")
-                                # Temporarily disable strict mode in the dispatcher for this single retry
+                                log("\u2705 User approved sandbox bypass. Retrying action...")
                                 old_strict = self.dispatcher.sandbox_config.get("strict_mode", True)
                                 self.dispatcher.sandbox_config["strict_mode"] = False
                                 try:
@@ -570,11 +534,10 @@ class Agent:
                                     else:
                                         observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
                                 finally:
-                                    # Always restore the original security constraint immediately after
                                     self.dispatcher.sandbox_config["strict_mode"] = old_strict
                                 is_violation = False
                             else:
-                                log("🛑 [System] Sandbox bypass denied. Forcing agent termination.")
+                                log("\U0001f6d1 [System] Sandbox bypass denied. Forcing agent termination.")
                                 self.state.is_complete = True
                                 clean_error_msg = "Task aborted by system sandbox constraints. The requested action was blocked for security reasons."
                                 self.state.summary = clean_error_msg
@@ -586,23 +549,15 @@ class Agent:
                                 break
 
                         if tool_name == "error" and "Connection Error" in str(llm_response.get("reasoning", "")):
-                            log("🛑 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
+                            log("\U0001f6d1 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
                             break
 
                         self.state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name))
                         self.state.iterations += 1
 
             if not self.state.is_complete and not self.state.is_canceled:
-                log("\n⚠️ --- Agent Loop Terminated (Max Iterations Reached) ---")
+                log("\n\u26a0\ufe0f --- Agent Loop Terminated (Max Iterations Reached) ---")
 
-                # ------------------------------------------------------------------
-                # AI Governance: Strict Loop Timeout (Runaway Agent Mitigation)
-                # ------------------------------------------------------------------
-                # Explicitly flag the parent trace as a failure so that Phoenix
-                # dashboards, alerting rules, and on-call runbooks can distinguish
-                # a legitimate completion from a runaway agent that was killed
-                # by the iteration guardrail.
-                # ------------------------------------------------------------------
                 if parent_span.is_recording():
                     parent_span.set_status(
                         trace.Status(
@@ -614,12 +569,10 @@ class Agent:
                     parent_span.set_attribute("governance.termination_reason", "max_iterations_reached")
                     parent_span.set_attribute("governance.max_iterations", int(self.state.max_iterations))
                     parent_span.set_attribute("governance.iterations_executed", int(self.state.iterations))
-
-                    # Record cumulative token consumption at the point of kill
                     parent_span.set_attribute("governance.cumulative_token_count_at_termination", int(self.cumulative_token_count))
 
                 self.state.summary = (
-                    f"⚠️ Agent loop terminated: max_iterations limit "
+                    f"\u26a0\ufe0f Agent loop terminated: max_iterations limit "
                     f"({self.state.max_iterations}) reached. The agent was unable "
                     f"to complete the task within the allocated iteration budget."
                 )
@@ -633,12 +586,12 @@ class Agent:
                         )
                     )
                     parent_span.set_attribute("governance.termination_reason", "user_cancelled")
-                log("\n🛑 --- Agent Loop Cancelled ---")
+                log("\n\U0001f6d1 --- Agent Loop Cancelled ---")
 
             else:
                 if parent_span.is_recording():
                     parent_span.set_status(trace.Status(trace.StatusCode.OK))
-                log("\n🏁 --- Agent Loop Completed ---")
+                log("\n\U0001f3c1 --- Agent Loop Completed ---")
 
             return self.state
 

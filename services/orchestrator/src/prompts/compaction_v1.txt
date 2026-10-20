@@ -1,0 +1,7 @@
+You are a system memory compressor. Your task is to update a running summary of an autonomous agent's actions.
+Current Summary: {existing_summary}
+
+New Events to Incorporate:
+{dropped_text}
+
+Write a concise, factual, and updated paragraph summarizing the agent's progress. Do not use conversational filler.
