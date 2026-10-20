@@ -407,7 +407,7 @@ export class UdsClient extends EventEmitter {
     }
 
     /**
-     * Injects a mid-task guidance message into the agent's queue.
+     * Injects a mid-task input message into the agent's queue.
      */
     public injectMessage(message: string): Promise<any> {
         return this.request("inject_message", { message: message });

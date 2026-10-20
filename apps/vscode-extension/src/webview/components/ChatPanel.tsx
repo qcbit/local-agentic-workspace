@@ -169,7 +169,7 @@ export const ChatPanel: React.FC = () => {
         if (!input.trim()) return;
         
         // Add the message to the UI instantly so the user sees it
-        const injectedText = `⚠️ [User Guidance Interjected]: ${input}`;
+        const injectedText = `⚠️ [User Input Interjected]: ${input}`;
         setMessages(prev => [...prev, { role: 'user', content: injectedText }]);
         setIsAutoScrollEnabled(true);
         
