@@ -1,6 +1,7 @@
 # OS & System
 .DS_Store
 .agentic_workspace
+.env
 
 # Inter-Process Communication & Runtime Sockets
 /tmp/*.sock

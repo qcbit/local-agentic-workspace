@@ -4,17 +4,45 @@ The context manager no longer accepts a ``llm_config`` dict for token-estimation
 parameters.  Instead it interrogates the assigned ``llm_provider`` for
 ``chars_per_token`` and ``model``, keeping the memory layer decoupled from the
 config parser entirely.
+
+Compaction health
+-----------------
+When the dedicated compaction model is unavailable (e.g. an Ollama model that
+has not been ``pull``-ed yet), the manager used to fail *silently*, returning
+the prior summary and quietly leaking context past the token window on every
+overflow.  This is now a first-class, observable condition:
+
+* ``compaction_disabled`` / ``compaction_disabled_reason`` flag the failure
+* a single, prominent WARNING (deduplicated) is emitted for the UI/log pipeline
+* ``compaction_status()`` lets the socket-owning orchestrator push the alert
+
+The memory layer only *reports* the disabled state; relaying it to the VS Code
+UI remains the orchestrator's job, preserving this module's decoupling.
 """
 
 from typing import List, Dict, Any, Optional
 
 import logging
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
 
 logger = logging.getLogger(__name__)
 
 tracer = trace.get_tracer(__name__)
+
+# Substrings that indicate the requested model is not present on the server
+# (i.e. a "model not downloaded / not pulled" situation) rather than a transient
+# network or generic API failure.  Matching is done case-insensitively.
+_MODEL_MISSING_MARKERS = (
+    "model not found",
+    "not found",
+    "no such model",
+    "does not exist",
+    "model not pulled",
+    "manifest for",
+    "unknown model",
+    "unknown: model",
+    "404",
+)
 
 
 class SlidingContextManager:
@@ -41,6 +69,15 @@ class SlidingContextManager:
         # Reset to 0 by the Agent after each poll.
         self.last_compaction_token_overhead: int = 0
 
+        # --- Compaction health (new) ---
+        # Set True the moment a model-not-found condition is detected so the
+        # orchestrator can proactively warn the user that compaction is disabled.
+        self.compaction_disabled: bool = False
+        self.compaction_disabled_reason: str = ""
+        # Once a model-not-found warning has been surfaced for this session we
+        # do not re-spam the UI on every subsequent context overflow.
+        self._compaction_missing_warned: bool = False
+
         logger.info(
             f"\U0001f9e0 Context Manager initialized for '{self.model_name}' "
             f"(Ratio: {self.chars_per_token} chars/token, Max: {self.max_tokens})"
@@ -56,6 +93,89 @@ class SlidingContextManager:
 
     def _estimate_tokens(self, text: str) -> int:
         return max(1, int(len(text) / self.chars_per_token))
+
+    @staticmethod
+    def _is_model_missing_error(exc: BaseException) -> bool:
+        """Return True if ``exc`` looks like a 'model not downloaded' failure.
+
+        This is deliberately a heuristic over the exception's text; the goal is
+to distinguish a recoverable "pull the model" situation from an opaque
+network/SDK error so the UI can show an actionable, non-alarming message.
+        """
+        haystack = " ".join(
+            str(part) for part in (getattr(exc, "args", ()) or ()) + (str(exc),) if part
+        ).lower()
+        return any(marker in haystack for marker in _MODEL_MISSING_MARKERS)
+
+    def _raise_model_missing_alert(self, exc: BaseException) -> None:
+        """Record the disabled state and surface a single, prominent warning.
+
+        The alert is emitted exactly ONCE per manager instance so that repeated
+        context overflows do not flood the UI.  The orchestrator may read
+        :meth:`compaction_status` to relay the alert to the editor over the
+        ``agent_status`` channel.
+        """
+        self.compaction_disabled = True
+
+        model = self.model_name or "<unknown>"
+        if self._is_model_missing_error(exc):
+            self.compaction_disabled_reason = (
+                f"Compaction is DISABLED: the configured compaction model "
+                f"'{model}' is not available on the local server. "
+                f"Context overflows will NOT be summarized and the working "
+                f"context will keep growing. Download it to re-enable "
+                f"compaction:  ollama pull {model}"
+            )
+        else:
+            self.compaction_disabled_reason = (
+                f"Compaction is DISABLED: the compaction provider could not "
+                f"be used (model '{model}'). Context overflows will NOT be "
+                f"summarized. Details: {exc}"
+            )
+
+        if not self._compaction_missing_warned:
+            self._compaction_missing_warned = True
+            # Distinctive, machine-grippable prefix so the orchestrator / log
+            # shipper can recognize this as a proactive compaction alert.
+            logger.warning(
+                "[Compaction-Disabled] %s",
+                self.compaction_disabled_reason,
+            )
+        else:
+            logger.debug(
+                "[Compaction-Disabled] Recurring compaction failure suppressed: %s", exc
+            )
+
+    def compaction_status(self) -> Dict[str, Any]:
+        """Snapshot of compaction health for the orchestrator / UI.
+
+        Returns a plain dict the socket-owning layer can forward unchanged to a
+        ``client.showErrorMessage`` / ``agent_status`` payload, e.g.::
+
+            {
+                "disabled": True,
+                "reason": "Compaction is DISABLED: ...",
+                "model": "qwen2.5:1.5b",
+                "fix_hint": "ollama pull qwen2.5:1.5b"
+            }
+        """
+        if not self.compaction_disabled:
+            return {"disabled": False, "reason": "", "model": self.model_name, "fix_hint": ""}
+
+        fix_hint = f"ollama pull {self.model_name}" if self._is_model_missing_for_model() else ""
+        return {
+            "disabled": True,
+            "reason": self.compaction_disabled_reason,
+            "model": self.model_name,
+            "fix_hint": fix_hint,
+        }
+
+    def _is_model_missing_for_model(self) -> bool:
+        """Helper used only for fix_hint computation (no exception available)."""
+        # We only know the failure kind from the last recorded reason; reuse the
+        # wording we stored rather than re-inspecting an exception that may be
+        # long gone.
+        return "not available on the local server" in self.compaction_disabled_reason
 
     def _generate_summary(
         self, existing_summary: str, dropped_messages: List[Any], available_tokens: int = 0
@@ -116,9 +236,20 @@ class SlidingContextManager:
                 compaction_span.set_attribute("llm.token_count.total", int(prompt_tokens))
                 compaction_span.set_attribute("compaction.token_overhead", int(prompt_tokens))
 
+                # NEW: detect-and-raise instead of failing silently. A dedicated
+                # one-time warning is surfaced and the disabled state recorded so
+                # the orchestrator can proactively alert the user in the UI.
+                self._raise_model_missing_alert(exc)
+
                 logger.error(f"Summarization failed: {exc}")
                 self.last_compaction_token_overhead = int(prompt_tokens)
                 return existing_summary
+
+            # A successful summarization re-enables compaction; clear any prior
+            # disabled flag (e.g. the model was pulled mid-session).
+            if self.compaction_disabled:
+                self.compaction_disabled = False
+                self.compaction_disabled_reason = ""
 
             # --- Token accounting (from the actual response) ---
             completion_tokens = self._estimate_tokens(response)
