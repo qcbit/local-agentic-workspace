@@ -15,6 +15,7 @@ class Message:
     role: Role
     content: str
     name: Optional[str] = None
+    is_noise: bool = False
 
 
 @dataclass
