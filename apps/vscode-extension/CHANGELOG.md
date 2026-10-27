@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.16.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.15.0...v0.16.0) (2026-10-27)
+
+
+### Features
+
+* **metrics:** Instrument to trace token usage. ([0730647](https://github.com/qcbit/local-agentic-workspace/commit/07306473c12c1496628136ca09ddc3cb56e144e3))
+* **metrics:** Instrument to trace token usage. ([7662d58](https://github.com/qcbit/local-agentic-workspace/commit/7662d5819e3d969264b412e9fc6900b634cf6f45))
+
+
+### Bug Fixes
+
+* **latency:** truncate semantic search codebase result ([7662d58](https://github.com/qcbit/local-agentic-workspace/commit/7662d5819e3d969264b412e9fc6900b634cf6f45))
+* **settings:** Secure data layer against schema drift ([7662d58](https://github.com/qcbit/local-agentic-workspace/commit/7662d5819e3d969264b412e9fc6900b634cf6f45))
+
 ## [0.15.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.14.1...v0.15.0) (2026-10-20)
 
 
