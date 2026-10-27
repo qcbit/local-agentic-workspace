@@ -213,15 +213,30 @@ class Agent:
             )
 
     async def reason(self, context: List[Dict[str, str]]) -> Dict[str, Any]:
-        raw_response = await asyncio.to_thread(self.llm_provider.generate, context)
-
         cptr: float = getattr(self.memory, "chars_per_token", 3.5)
         prompt_chars = sum(len(msg.get("content", "")) for msg in context)
         prompt_tokens = max(1, int(prompt_chars / cptr))
-        completion_tokens = max(1, int(len(raw_response or "") / cptr))
 
         with tracer.start_as_current_span("llm_call") as llm_span:
+            # --- Input-side attributes (known before the call) ---
             llm_span.set_attribute("llm.provider", type(self.llm_provider).__name__)
+            llm_span.set_attribute("llm.token_count.prompt", int(prompt_tokens))
+
+            # --- Perform the LLM call INSIDE the active span so the
+            #     OpenAI auto-instrumentor nests its span beneath llm_call ---
+            try:
+                raw_response = await asyncio.to_thread(self.llm_provider.generate, context)
+            except Exception as exc:
+                llm_span.set_status(
+                    trace.Status(trace.StatusCode.ERROR, f"LLM call failed: {exc}")
+                )
+                llm_span.record_exception(exc)
+                llm_span.set_attribute("llm.token_count.completion", 0)
+                llm_span.set_attribute("llm.token_count.total", int(prompt_tokens))
+                raise
+
+            # --- Output-side attributes (known after the call) ---
+            completion_tokens = max(1, int(len(raw_response or "") / cptr))
             self._record_token_usage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
@@ -309,7 +324,8 @@ class Agent:
                 else:
                     self.state.is_complete = False 
                     self.state.is_canceled = False
-                    self.state.iterations = 0 
+                    self.state.iterations = 0
+                    self.state.max_iterations = self.max_iterations
                     log(f"[bold cyan]\u25b6\ufe0f --- Continuing Agent Loop ---[/bold cyan]\nFollow-up: {user_goal}")
 
                 self.state.history.append(Message(role=Role.USER, content=user_goal))
@@ -377,6 +393,7 @@ class Agent:
                                 - OUTPUT CONTRACT: {ctx.get('output_contract', '')}
                                 """
 
+                        # --- 1. Evaluate Reflection (No System Prompt Mutation) ---
                         needs_reflection = False
                         if self.state.iterations > 0 and self.state.iterations % 3 == 0:
                             needs_reflection = True
@@ -391,10 +408,21 @@ class Agent:
                                 {"status": "reflecting", "message": "Critique Required: Evaluating recent actions..."}
                             )
 
-                        if needs_reflection:
-                            system_prompt += "\n\nCRITIQUE REQUIRED: Review your last observations. Did your last action succeed? State your revised approach before calling the next tool."
-
+                        # --- 2. Build Base Context (Layer 1 Static + Layer 2 History) ---
+                        # Pass the perfectly static system_prompt to the memory manager
                         context = self.memory.build_safe_context(self.state, system_prompt)
+
+                        # --- 3. Append Volatile State (Layer 3 Dynamic) ---
+                        # Inject transient environment variables and reflections as a temporary user block
+                        volatile_state = f"[System State]\nAuto-Approve: {self.auto_approve}\n"
+                        
+                        if needs_reflection:
+                            volatile_state += "\nCRITIQUE REQUIRED: Review your last observations. Did your last action succeed? State your revised approach before calling the next tool."
+
+                        # 🎯 INVERT PROMPT STRUCTURE: Place the JSON contract at the absolute end
+                        volatile_state += "\n\nFINAL DIRECTIVE: Your output MUST be a single valid JSON object with EXACTLY these keys: \"reasoning\" (string), \"tool\" (string), and \"tool_args\" (dictionary)."
+
+                        context.append({"role": "user", "content": volatile_state.strip()})
 
                         # --- AI Governance: Fold compaction overhead into cumulative budget ---
                         compaction_overhead = getattr(self.memory, "last_compaction_token_overhead", 0)
@@ -468,6 +496,21 @@ class Agent:
                         log(f"[bold magenta]\U0001f9e0 [Reasoning][/bold magenta] {reasoning}")
                         
                         if self.uds_server:
+                            # [Compaction Status Relay] Proactively surface a compaction-disabled alert to the UI.
+                            try:
+                                if hasattr(self.memory, 'compaction_status'):
+                                    _comp_status = self.memory.compaction_status()
+                                    if _comp_status and _comp_status.get('disabled') and not getattr(self, '_compaction_alert_sent', False):
+                                        self._compaction_alert_sent = True
+                                        logger.warning("[Compaction-Disabled] Relaying alert to UI: %s", _comp_status.get('reason'))
+                                        await self.uds_server.send_notification(
+                                            "agent_status",
+                                            {"status": "compaction_disabled", "message": _comp_status.get("reason", "Compaction disabled"),
+                                             "fix_hint": _comp_status.get("fix_hint", ""), "model": _comp_status.get("model", "")}
+                                        )
+                            except Exception as _comp_alert_exc:
+                                logger.debug("Compaction status relay failed: %s", _comp_alert_exc)
+
                             await self.uds_server.send_notification(
                                 "agent_status", 
                                 {"status": "thinking", "message": reasoning}
@@ -548,9 +591,16 @@ class Agent:
                                 iter_span.set_status(trace.Status(trace.StatusCode.ERROR, "Sandbox constraint violation"))
                                 break
 
-                        if tool_name == "error" and "Connection Error" in str(llm_response.get("reasoning", "")):
-                            log("\U0001f6d1 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
-                            break
+                        if tool_name == "error":
+                            reasoning_text = str(llm_response.get("reasoning", ""))
+                            if "Connection Error" in reasoning_text:
+                                log("\U0001f6d1 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
+                                break
+                            elif "Failed to parse JSON" in reasoning_text:
+                                log("\U0001f6d1 [Circuit Breaker] LLM produced invalid JSON (likely context overflow). Aborting loop to prevent runaway errors.")
+                                self.state.is_complete = True
+                                self.state.summary = "Task aborted: The local engine failed to produce valid JSON, likely due to context window exhaustion."
+                                break
 
                         self.state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name))
                         self.state.iterations += 1

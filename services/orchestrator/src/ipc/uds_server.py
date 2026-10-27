@@ -1,36 +1,6 @@
-import asyncio
-import azure.identity
-import collections.abc
-import copy
-import hashlib
-import httpx
-import json
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from openinference.instrumentation.openai import OpenAIInstrumentor
-from loguru import logger
-import logging
-import openai
 import os
-from pathlib import Path
-import pydantic
-import socket
-import stat
 import sys
-from typing import Any, Dict, Optional
-import uuid
-
-# 🎯 FAILSAFE: Force UTF-8 encoding on Windows to prevent emoji crashes
-if sys.stdout:
-    reconfigure = getattr(sys.stdout, 'reconfigure', None)
-    if callable(reconfigure):
-        reconfigure(encoding='utf-8', errors='replace')
-if sys.stderr:
-    reconfigure = getattr(sys.stderr, 'reconfigure', None)
-    if callable(reconfigure):
-        reconfigure(encoding='utf-8', errors='replace')
+import asyncio
 
 # 1. Grab the current fallback path
 workspace_root = os.getcwd()
@@ -55,6 +25,36 @@ if os.path.exists(workspace_root):
 
 # Now os.getcwd(), relative paths, and subprocess.run will all be perfectly aligned!
 workspace_root = os.getcwd()
+# --- Inject .env loader using the resolved workspace root ---
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=os.path.join(workspace_root, ".env"), override=True)
+
+import azure.identity
+import collections.abc
+import copy
+import hashlib
+import httpx
+import json
+from opentelemetry import trace
+from loguru import logger
+import logging
+import openai
+from pathlib import Path
+import pydantic
+import socket
+import stat
+from typing import Any, Dict, Optional
+import uuid
+
+# 🎯 FAILSAFE: Force UTF-8 encoding on Windows to prevent emoji crashes
+if sys.stdout:
+    reconfigure = getattr(sys.stdout, 'reconfigure', None)
+    if callable(reconfigure):
+        reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr:
+    reconfigure = getattr(sys.stderr, 'reconfigure', None)
+    if callable(reconfigure):
+        reconfigure(encoding='utf-8', errors='replace')
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(script_dir, ".."))  # .../services/orchestrator/src
@@ -71,6 +71,7 @@ for path in (src_dir, workspace_root):
 from rag.vector_store import LocalVectorStore
 from services.orchestrator.src.agent.agent_loop import Agent, Message, Role
 from services.orchestrator.src.llm.provider import UniversalLLMProvider
+from services.orchestrator.src.llm.tracing import setup_phoenix_tracing
 from services.orchestrator.src.logging.log_filter import scrub_secrets_from_string, SecretRedactingFilter
 
 from opentelemetry import trace
@@ -116,18 +117,9 @@ def setup_logging(config_data=None):
     # 2. Configure OpenTelemetry ONLY if enabled
     if obs_enabled:
         try:
-            from phoenix.otel import register
-            register(
-                project_name="local-agentic-workspace",
-                endpoint=obs_endpoint
-            )
+            setup_phoenix_tracing(endpoint=obs_endpoint)
         except Exception:
-            pass # Only initialize once
-
-        try:
-            OpenAIInstrumentor().instrument()
-        except Exception:
-            pass
+            pass  # Only initialize once
 
     # 3. Configure Loguru
     log_dir = os.path.join(workspace_root, ".agentic_workspace", "logs")
@@ -524,7 +516,8 @@ class JsonRpcUdsServer:
                     logger.info("⚠️ Agent is now UNHINGED. Infinite loop limit removed.")
                 else:
                     self.persistent_agent.state.iterations = 0
-                    logger.info("🔄 Agent iterations reset. Resuming task.")
+                    self.persistent_agent.state.max_iterations = self.persistent_agent.max_iterations
+                    logger.info(f"🔄 Agent iterations reset. Resuming task (max_iterations={self.persistent_agent.max_iterations}).")
                 
                 # Resume without passing a new goal so it picks up where it left off
                 result_state = await self._run_agent_async(None, auto_approve=is_auto_approve)
@@ -719,6 +712,13 @@ class JsonRpcUdsServer:
         # Strip the massive float vectors out before sending over IPC
         clean_results = []
         for r in raw_results:
+            # 🎯 CACHE DEFEAT FIX: Truncate the file content to a 3-line snippet
+            content = str(r.get("content", ""))
+            lines = content.split('\n')
+            snippet = '\n'.join(lines[:3])
+            if len(lines) > 3:
+                snippet += '\n... [TRUNCATED - Use extract_code_structure to read the full block]'
+
             clean_results.append({
                 "file_path": str(r.get("file_path")),
                 "content": str(r.get("content", "")),

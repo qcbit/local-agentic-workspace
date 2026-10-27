@@ -56,6 +56,14 @@ export const SettingsPanel: React.FC = () => {
     const [maxLatencyMs, setMaxLatencyMs] = useState(250);
     const [fallbackToDistance, setFallbackToDistance] = useState(true);
 
+    // Compaction Model Routing (Part A: lossless round-trip)
+    const [compactionModelName, setCompactionModelName] = useState('');
+    const [compactionEndpointUrl, setCompactionEndpointUrl] = useState('');
+
+    // Raw profile baseline — captures the full raw profile so undocumented keys
+    // (e.g. a hand-edited `compaction` block in .agentic_config.json) survive save.
+    const [rawProfileBaseline, setRawProfileBaseline] = useState<Record<string, any>>({});
+
     const applyProfileState = (profileName: string, targetConfig: any) => {
         const profile = targetConfig?.profiles?.[profileName];
         if (profile) {
@@ -86,6 +94,14 @@ export const SettingsPanel: React.FC = () => {
             setCandidatePoolK(profile.rag?.rerank?.candidate_pool_k || 'auto');
             setMaxLatencyMs(profile.rag?.rerank?.max_latency_ms ?? 250);
             setFallbackToDistance(profile.rag?.rerank?.fallback_to_distance ?? true);
+
+            // Compaction model routing (Part A: lossless round-trip)
+            setCompactionModelName(profile.compaction?.model_name || '');
+            setCompactionEndpointUrl(profile.compaction?.endpoint_url || '');
+
+            // Capture the full raw profile so ANY undocumented key (e.g. a
+            // hand-edited `compaction` block or future schema fields) survives save.
+            setRawProfileBaseline(profile);
         } else {
             setEndpointUrl('http://127.0.0.1:11434/v1/chat/completions');
             setApiKey('');
@@ -108,6 +124,10 @@ export const SettingsPanel: React.FC = () => {
             setCandidatePoolK('auto');
             setMaxLatencyMs(250);
             setFallbackToDistance(true);
+            // Compaction model routing (Part A: lossless round-trip)
+            setCompactionModelName('');
+            setCompactionEndpointUrl('');
+            setRawProfileBaseline({});
         }
     };
 
@@ -216,17 +236,24 @@ export const SettingsPanel: React.FC = () => {
             config: {
                 active_profile: activeProfile,
                 profile_settings: {
-                    llm: { 
+                    // Part A (lossless): spread the raw on-disk profile first so
+                    // ANY undocumented key (compaction, search, future fields,
+                    // hand-edited entries) survives the save round-trip.
+                    ...(rawProfileBaseline || {}),
+                    llm: {
+                        ...(rawProfileBaseline?.llm || {}),
                         endpoint_url: endpointUrl,
                         api_key: apiKey,
                         model_name: modelName,
                         models_path: modelsPath.replace(/\\/g, '/'),
                         chars_per_token: charsPerToken
                     },
-                    memory: { 
+                    memory: {
+                        ...(rawProfileBaseline?.memory || {}),
                         max_tokens: tokenLimit
                     },
                     sandbox: {
+                        ...(rawProfileBaseline?.sandbox || {}),
                         strict_mode: strictMode,
                         allowed_external_paths: allowedExternalPaths
                             .split('\n')
@@ -234,20 +261,25 @@ export const SettingsPanel: React.FC = () => {
                             .filter(p => p !== '')
                     },
                     logging: {
+                        ...(rawProfileBaseline?.logging || {}),
                         level: logLevel,
                         rotation: logRotation,
                         retention: logRetention
                     },
                     observability: {
+                        ...(rawProfileBaseline?.observability || {}),
                         enabled: obsEnabled,
                         endpoint: obsEndpoint
                     },
                     search: {
+                        ...(rawProfileBaseline?.search || {}),
                         enabled: searchEnabled,
                         searxng_url: searxngUrl
                     },
                     rag: {
+                        ...(rawProfileBaseline?.rag || {}),
                         rerank: {
+                            ...(rawProfileBaseline?.rag?.rerank || {}),
                             enabled: rerankEnabled,
                             model: rerankModel,
                             top_k: topK,
@@ -255,6 +287,13 @@ export const SettingsPanel: React.FC = () => {
                             max_latency_ms: maxLatencyMs,
                             fallback_to_distance: fallbackToDistance
                         }
+                    },
+                    // Compaction model routing — preserved from rawProfileBaseline
+                    // and overridden by the dedicated UI fields (lossless round-trip).
+                    compaction: {
+                        ...(rawProfileBaseline?.compaction || {}),
+                        ...(compactionModelName    ? { model_name:    compactionModelName    } : {}),
+                        ...(compactionEndpointUrl  ? { endpoint_url:  compactionEndpointUrl  } : {})
                     }
                 }
             }
@@ -437,7 +476,39 @@ export const SettingsPanel: React.FC = () => {
                     </div>
 
                     <hr style={{ width: '100%', borderColor: 'var(--vscode-widget-border)' }} />
-                    
+
+                    <h3>Compaction Model Routing</h3>
+                    <p style={{ fontSize: '12px', color: 'var(--vscode-descriptionForeground)' }}>
+                        Optional. When set, the agent routes context-compaction
+                        to this smaller model/endpoint instead of the main LLM.
+                        Leave blank to fall back to the profile's primary
+                        <code> llm</code> block.
+                    </p>
+
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        <label>Compaction Model Name</label>
+                        <input
+                            type="text"
+                            value={compactionModelName}
+                            onChange={(e) => setCompactionModelName(e.target.value)}
+                            placeholder="e.g. qwen2.5:1.5b (empty = primary model)"
+                            style={inputStyle}
+                        />
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        <label>Compaction Endpoint URL</label>
+                        <input
+                            type="text"
+                            value={compactionEndpointUrl}
+                            onChange={(e) => setCompactionEndpointUrl(e.target.value)}
+                            placeholder="e.g. http://127.0.0.1:11434/v1/chat/completions"
+                            style={inputStyle}
+                        />
+                    </div>
+
+                    <hr style={{ width: '100%', borderColor: 'var(--vscode-widget-border)' }} />
+
                     <h3>Sandbox Security</h3>
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
