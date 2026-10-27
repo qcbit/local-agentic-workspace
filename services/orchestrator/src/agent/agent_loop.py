@@ -359,6 +359,28 @@ class Agent:
 
             with logger.contextualize(run_id=self.state.run_id):
                 budget_exhausted = False
+                tool_descriptions = "\n".join([f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()])
+
+                # --- Load system prompt from external template file ---
+                from services.orchestrator.src.prompts import load_prompt
+                _system_tpl = load_prompt("agent_system_v1")
+                system_prompt = _system_tpl.format(
+                    tool_descriptions=tool_descriptions,
+                    workspace_root=self.workspace_root,
+                )
+
+                if getattr(self.state, "workflow_context", None):
+                    ctx = self.state.workflow_context
+                    if ctx:
+                        system_prompt += f"""
+                        
+                        WORKFLOW CONSTRAINTS & ROLE:
+                        - ROLE: {ctx.get('role', '')}
+                        - TASK: {ctx.get('task', '')}
+                        - CONSTRAINTS: {json.dumps(ctx.get('constraints', []))}
+                        - FAILURE BEHAVIOR: {ctx.get('failure_behavior', '')}
+                        - OUTPUT CONTRACT: {ctx.get('output_contract', '')}
+                        """
                 while not self.state.is_complete and not self.state.is_canceled and not budget_exhausted and self.state.iterations < self.state.max_iterations:
                     with tracer.start_as_current_span(f"iteration_{self.state.iterations}") as iter_span:
                         log(f"\n[dim]\U0001f504 --- Iteration {self.state.iterations + 1} ---[/dim]")
@@ -370,29 +392,6 @@ class Agent:
                             self.state.history.append(Message(role=Role.USER, content=formatted_input))
                             log(f"\U0001f4e5 [System] Injected user input into context window.")
                         
-                        tool_descriptions = "\n".join([f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()])
-
-                        # --- Load system prompt from external template file ---
-                        from services.orchestrator.src.prompts import load_prompt
-                        _system_tpl = load_prompt("agent_system_v1")
-                        system_prompt = _system_tpl.format(
-                            tool_descriptions=tool_descriptions,
-                            workspace_root=self.workspace_root,
-                        )
-
-                        if getattr(self.state, "workflow_context", None):
-                            ctx = self.state.workflow_context
-                            if ctx:
-                                system_prompt += f"""
-                                
-                                WORKFLOW CONSTRAINTS & ROLE:
-                                - ROLE: {ctx.get('role', '')}
-                                - TASK: {ctx.get('task', '')}
-                                - CONSTRAINTS: {json.dumps(ctx.get('constraints', []))}
-                                - FAILURE BEHAVIOR: {ctx.get('failure_behavior', '')}
-                                - OUTPUT CONTRACT: {ctx.get('output_contract', '')}
-                                """
-
                         # --- 1. Evaluate Reflection (No System Prompt Mutation) ---
                         needs_reflection = False
                         if self.state.iterations > 0 and self.state.iterations % 3 == 0:
@@ -602,7 +601,30 @@ class Agent:
                                 self.state.summary = "Task aborted: The local engine failed to produce valid JSON, likely due to context window exhaustion."
                                 break
 
-                        self.state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name))
+                        # --- Pre-Compaction Heuristic Noise Tagging ---
+                        obs_lower = str(observation).lower()
+                        is_noise = any(
+                            pattern in obs_lower
+                            for pattern in (
+                                "blocked by sandbox",
+                                "security violation",
+                                "blocked",
+                                "forbidden",
+                                "denied",
+                                "outside authorized workspace",
+                                "json parse error",
+                                "failed to parse json",
+                                "json.decoder",
+                                "jsondecodeerror",
+                                "file not found",
+                                "no such file",
+                                "not found: file",
+                                "no such directory",
+                            )
+                        )
+                        self.state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name, is_noise=is_noise))
+                        if is_noise:
+                            logger.debug(f"[Noise-Tag] Observation from '{tool_name}' flagged as noise for pre-compaction filtering.")
                         self.state.iterations += 1
 
             if not self.state.is_complete and not self.state.is_canceled:
