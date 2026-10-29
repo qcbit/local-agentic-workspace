@@ -157,6 +157,19 @@ To customize or disable the reranker, update your .agentic_config.json profile:
 * **Context Limit Reached (Amnesia Loop):** If the agent repeatedly loops on a task and the logs show `Summarizing and dropping old messages...`, the agent's memory is full. Increase your `maxTokens` limit in the settings to accommodate larger files.
 * **Blank Chat Webview:** If the React chat panel loads entirely white, the VS Code state cache may be poisoned. Run `make dev` to ensure the webview bundle is compiled, then run the `Developer: Reload Window` command in VS Code.
 * **Port 7777 in Use:** If the backend fails to spawn, a previous orphaned Python process may be holding the TCP socket open. Terminate the process manually using `lsof -i :7777` and `kill -9 <PID>`.
+* **SQLite**:
+  * Run ```sqlite3 .agentic_workspace/db/orchestrator.db```
+```SQL
+.mode column
+.header on
+```
+  * View All Sessions and Message Counts
+```SQL
+SELECT session_id, count(*) as message_count, max(created_at) as last_active 
+FROM messages 
+GROUP BY session_id 
+ORDER BY last_active DESC;
+```
 
 ## 🛡️ Privacy & Security
 

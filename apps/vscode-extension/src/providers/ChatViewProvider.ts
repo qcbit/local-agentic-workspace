@@ -82,7 +82,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     this._udsClient.request('reset_session', {});
                     break;
                 case 'restore_session':
-                    this._udsClient.request('restore_session', { history: data.messages });
+                    this._udsClient.request('restore_session', { session_id: data.session_id });
+                    break;
+                case 'fetchHistory':
+                    await this.handleFetchHistory(webviewView.webview, data.sessionId);
+                    break;
+                case 'loadHistoryList':
+                    await this.handleLoadHistoryList(webviewView.webview, data.query);
+                    break;
+                case 'deleteHistory':
+                    await this.handleDeleteHistory(webviewView.webview, data.sessionId);
                     break;
                 case 'resume_task':
                     await this._resumeTask(data.mode, data.autoApprove ?? false);
@@ -114,7 +123,50 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
-/**
+    private async handleLoadHistoryList(webview: vscode.Webview, query: string) {
+        try {
+            const response = await this._udsClient.request('load_history_list', { query: query || '' });
+            const sessions = (response.sessions || []).map((s: any) => {
+                let timestampEpoch = s.timestamp;
+                if (typeof s.timestamp === 'string') {
+                    timestampEpoch = new Date(s.timestamp.replace('Z', '') + 'Z').getTime();
+                }
+                return {
+                    id: s.id,
+                    title: s.title || `Session ${s.id.substring(0, 8)}...`,
+                    timestamp: timestampEpoch || Date.now()
+                };
+            });
+            webview.postMessage({ command: 'sessionList', sessions });
+        } catch (error: any) {
+            console.error("Failed to load history list via IPC:", error);
+            webview.postMessage({ command: 'sessionList', sessions: [] });
+        }
+    }
+
+    private async handleDeleteHistory(webview: vscode.Webview, sessionId: string) {
+        try {
+            await this._udsClient.request('delete_history', { session_id: sessionId });
+            await this.handleLoadHistoryList(webview, '');
+        } catch (error: any) {
+            console.error("Failed to delete history session via IPC:", error);
+        }
+    }
+
+    private async handleFetchHistory(webview: vscode.Webview, sessionId: string) {
+        try {
+            const response = await this._udsClient.request('fetch_history', { session_id: sessionId });
+            const parsedRows = (response.history || []).map((row: any) => ({
+                ...row,
+                content: typeof row.content === 'string' ? JSON.parse(row.content) : row.content
+            }));
+            webview.postMessage({ command: 'historyData', history: parsedRows });
+        } catch (error: any) {
+            webview.postMessage({ command: 'historyData', history: [], error: error.message });
+        }
+    }
+
+    /**
      * Executes an agent task via the IPC socket and returns the result to the UI.
      */
     private async _executeTask(goal: string, autoApprove: boolean = false, chatHistory: any[] = []) {
