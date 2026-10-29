@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.16.0...v0.17.0) (2026-10-29)
+
+
+### Features
+
+* **compaction:** message history and context optimization ([bc79255](https://github.com/qcbit/local-agentic-workspace/commit/bc7925509381750ad24ed202ede3d00b5abd7f6c))
+
+
+### Bug Fixes
+
+* **CI:** trigger manual release build ([aef8937](https://github.com/qcbit/local-agentic-workspace/commit/aef89375d2951fdd33522b11e1aaef149a2c0f5c))
+
 ## [0.16.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.15.0...v0.16.0) (2026-10-27)
 
 
