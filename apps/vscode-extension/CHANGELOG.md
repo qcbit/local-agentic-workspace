@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.17.0...v0.18.0) (2026-10-31)
+
+
+### Features
+
+* **Chat:** Message persistence ([6877afe](https://github.com/qcbit/local-agentic-workspace/commit/6877afe06b8bd779a8be01d9c5f71ce4886734ec))
+* **Chat:** Message persistence ([dbbc97b](https://github.com/qcbit/local-agentic-workspace/commit/dbbc97b76da29f9a1e6a89bd3e78d3397270d36e))
+
 ## [0.17.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.16.0...v0.17.0) (2026-10-29)
 
 
