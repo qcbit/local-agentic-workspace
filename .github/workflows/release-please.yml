@@ -29,13 +29,9 @@ jobs:
       matrix:
         include:
           # Apple Silicon Mac
-          - os: macos-14
+          - os: macos-26
             target: darwin-arm64
             binary: uds_server-macos-arm64
-          # Intel Mac
-          # - os: macos-13
-          #   target: darwin-x64
-          #   binary: uds_server-macos-x64
           # Linux
           - os: ubuntu-latest
             target: linux-x64
