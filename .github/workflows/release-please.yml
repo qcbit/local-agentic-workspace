@@ -57,7 +57,8 @@ jobs:
       - name: Install Node Dependencies
         run: |
           cd apps/vscode-extension
-          npm install
+          npm install --build-from-source=false
+        shell: bash
 
       - name: Setup Python
         uses: actions/setup-python@v5
