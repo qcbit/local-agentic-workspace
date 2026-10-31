@@ -66,7 +66,10 @@ build-frontend:
 	@echo "Transpiling the frontend..."
 	@echo "Compiling the React/TS frontend..."
 	@cd apps/vscode-extension && npm install
+	@cd apps/vscode-extension && npm rebuild better-sqlite3 --runtime=electron --target=34.0.0 --disturl=https://electronjs.org/headers
 	@cd apps/vscode-extension && npm run compile
+	@mkdir -p apps/vscode-extension/out/build/Release
+	@cp -R apps/vscode-extension/node_modules/better-sqlite3/build/Release/*.node apps/vscode-extension/out/build/Release/ 2>/dev/null || true
 
 build-backend:
 	@echo "Compiling the PyInstaller binary using the spec file..."

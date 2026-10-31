@@ -17,10 +17,19 @@ the exact object IDs of the summarized messages are pruned from history.
 """
 import asyncio
 from dataclasses import dataclass
+import os
+import json
 from typing import List, Dict, Any, Optional
 
 import logging
 from opentelemetry import trace
+from opentelemetry.trace import get_current_span
+from services.orchestrator.src.agent.state import AgentState
+from services.orchestrator.src.memory.persistence import (
+    MessageStore, 
+    serialize_message, 
+    deserialize_message
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +81,29 @@ class SlidingContextManager:
         memory_config: Dict[str, Any],
         model_name: str,
         llm_provider: Any,
+        state: AgentState,
         llm_config: Optional[Dict[str, Any]] = None,
+        max_tokens: int = 32768, 
+        summary_budget: int = 4096,
+        message_store: Optional[MessageStore] = None
     ) -> None:
         self.max_tokens = memory_config.get("max_tokens", 4000)
         self.llm_provider = llm_provider
 
         self.chars_per_token: float = float(getattr(llm_provider, "chars_per_token", 3.5))
         self.model_name: str = getattr(llm_provider, "model", model_name or "")
+
+        self.state = state
+        self.max_tokens = max_tokens
+        self.summary_budget = summary_budget
+
+        # Feature gate: Only attach store if ORCH_PERSIST=1
+        self._store = message_store if os.environ.get("ORCH_PERSIST") == "1" else None
+        
+        # Ensure we have a session key if persistence is active
+        if self._store and not self.state.run_id:
+            logger.warning("ORCH_PERSIST=1 but no run_id found in AgentState. Persistence disabled.")
+            self._store = None
 
         # --- Batch Eviction configuration ---
         self.compaction_chunk_size: int = int(
@@ -156,6 +181,90 @@ class SlidingContextManager:
             logger.debug(
                 "[Compaction-Disabled] Recurring compaction failure suppressed: %s", exc
             )
+
+    async def rehydrate(self, max_rows: int = 1000) -> None:
+        """Called by the orchestrator daemon on startup before the agent loop begins."""
+        if not self._store:
+            return
+
+        run_id = self.state.run_id
+        
+        try:
+            # 1. Rehydrate message history
+            rows = await self._store.latest(run_id, limit=max_rows)
+            if rows:
+                self.state.history = [deserialize_message(r.content) for r in rows]
+                logger.info("Rehydrated %d messages for session %s", len(self.state.history), run_id)
+
+            # 2. Rehydrate metadata (summary, user_goal)
+            summary_meta = await self._store.get_meta(run_id, "summary")
+            if summary_meta:
+                self.state.summary = json.loads(summary_meta)
+
+            goal_meta = await self._store.get_meta(run_id, "user_goal")
+            if goal_meta:
+                self.state.user_goal = goal_meta
+
+            # 3. Rehydrate token budget
+            self.state.total_tokens = await self._store.total_tokens(run_id)
+
+        except Exception as e:
+            logger.error("Failed to rehydrate session %s: %s", run_id, str(e), exc_info=True)
+            # Fallback to ephemeral state if DB is corrupted
+            self.state.history = []
+            self.state.total_tokens = 0
+
+    def _scrub_secrets(self, msg: dict) -> dict:
+        """
+        Stub for SecretsScrubber integration (Phase 1).
+        Will recursively replace known API keys/connection strings with [REDACTED].
+        """
+        # TODO: Inject real SecretsScrubber dependency here
+        return msg
+
+    async def _persist_message(self, msg: dict, token_count: int) -> None:
+        """Appends a single message to the durable journal with OTel correlation."""
+        if not self._store:
+            return
+
+        try:
+            # 1. Scrub secrets before serialization
+            scrubbed_msg = self._scrub_secrets(msg)
+            
+            # 2. OTel Trace Correlation
+            span = get_current_span()
+            ctx = span.get_span_context()
+            t_id = format(ctx.trace_id, '032x') if ctx.trace_id else None
+            s_id = format(ctx.span_id, '016x') if ctx.span_id else None
+
+            # 3. Determine next monotonic sequence ID
+            seq = (await self._store.max_seq(self.state.run_id) or -1) + 1
+
+            # 4. Write to SQLite
+            await self._store.append(
+                session_id=self.state.run_id,
+                seq=seq,
+                role=scrubbed_msg.get("role", "user"),
+                content_json=serialize_message(scrubbed_msg),
+                token_count=token_count,
+                trace_id=t_id,
+                span_id=s_id,
+            )
+        except Exception as e:
+            # Log heavily but do not crash the agent loop if persistence fails
+            logger.error("Failed to persist message seq to SQLite: %s", str(e), exc_info=True)
+
+    async def append_message(self, msg: dict, token_count: int) -> None:
+        """Main entry point for adding a message to the sliding window."""
+        self.state.history.append(msg)
+        self.state.total_tokens += token_count
+        
+        # Fire-and-forget persistent write (awaited to maintain sequence order)
+        await self._persist_message(msg, token_count)
+        
+        # Evaluate compaction...
+        if self.state.total_tokens > self.max_tokens:
+            await self._chunked_compaction()
 
     def compaction_status(self) -> Dict[str, Any]:
         base: Dict[str, Any] = {

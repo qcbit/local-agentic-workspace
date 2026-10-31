@@ -7,7 +7,6 @@ const vscode = (window as any).vscodeApi || ((window as any).vscodeApi = acquire
 type ChatSession = {
     id: string;
     title: string;
-    messages: { role: string; content: string }[];
     timestamp: number;
 };
 
@@ -34,7 +33,7 @@ export const ChatPanel: React.FC = () => {
     const [searchQuery, setSearchQuery] = useState("");
     const [isReflecting, setIsReflecting] = useState(false);
     const [reflectionText, setReflectionText] = useState("");
-    
+    const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(false);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
 
@@ -48,6 +47,16 @@ export const ChatPanel: React.FC = () => {
     }, [messages, input, isAutoApprove, isLoading]);
 
     useEffect(() => {
+        if (isHistoryOpen) {
+            // Debounce the SQLite search slightly
+            const timeoutId = setTimeout(() => {
+                vscode.postMessage({ command: 'loadHistoryList', query: searchQuery });
+            }, 300);
+            return () => clearTimeout(timeoutId);
+        }
+    }, [isHistoryOpen, searchQuery]);
+
+    useEffect(() => {
         const handler = (event: MessageEvent) => {
             const message = event.data;
             if (message.command === 'agentThinking') {
@@ -58,6 +67,10 @@ export const ChatPanel: React.FC = () => {
             else if (message.command === 'agentReflecting') {
                 setIsReflecting(true);
                 setReflectionText(message.text);
+            }
+            else if (message.command === 'sessionList') {
+                setSessions(message.sessions);
+                setIsLoadingHistory(false);
             }
             else if (message.command === 'agentPaused') {
                 setIsPaused(true);
@@ -93,6 +106,14 @@ export const ChatPanel: React.FC = () => {
                 setCurrentThought("");
                 setIsReflecting(false);
             }
+            else if (message.command === 'historyData') {
+                if (message.error) {
+                    console.error("Failed to load history:", message.error);
+                    return;
+                }
+                // Update your React state with the untrimmed trajectory directly from SQLite
+                setMessages(message.history);
+            }
         };
         window.addEventListener('message', handler);
         return () => window.removeEventListener('message', handler);
@@ -111,17 +132,7 @@ export const ChatPanel: React.FC = () => {
         }
     }, [messages, currentThought, reflectionText, isLoading, isAutoScrollEnabled]);
 
-    const saveCurrentSession = () => {
-        if (messages.length === 0) return;
-        const title = messages.find(m => m.role === 'user')?.content.substring(0, 30) || "New Chat";
-        setSessions(prev => {
-            const existing = prev.filter(s => s.id !== currentSessionId);
-            return [{ id: currentSessionId, title, messages, timestamp: Date.now() }, ...existing];
-        });
-    };
-
     const handleNewChat = () => {
-        saveCurrentSession();
         setMessages([]);
         setCurrentSessionId(Date.now().toString());
         setIsHistoryOpen(false);
@@ -130,13 +141,14 @@ export const ChatPanel: React.FC = () => {
     };
 
     const loadSession = (session: ChatSession) => {
-        saveCurrentSession();
-        setMessages(session.messages);
+        setMessages([]); 
         setCurrentSessionId(session.id);
         setIsHistoryOpen(false);
         setIsPaused(false);
         setIsAutoScrollEnabled(true);
-        vscode.postMessage({ type: 'restore_session', messages: session.messages });
+        
+        vscode.postMessage({ command: 'fetchHistory', sessionId: session.id });
+        vscode.postMessage({ type: 'restore_session', session_id: session.id });
     };
 
     const handleSend = () => {
@@ -225,11 +237,6 @@ export const ChatPanel: React.FC = () => {
         });
     };
 
-    const filteredSessions = sessions.filter(s => 
-        s.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-        s.messages.some(m => m.content.toLowerCase().includes(searchQuery.toLowerCase()))
-    );
-
     return (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', padding: '10px', boxSizing: 'border-box' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '10px' }}>
@@ -248,12 +255,38 @@ export const ChatPanel: React.FC = () => {
                         style={{ margin: '10px 0', padding: '5px' }}
                     />
                     <div style={{ overflowY: 'auto', flex: 1 }}>
-                        {filteredSessions.map(s => (
-                            <div key={s.id} onClick={() => loadSession(s)} style={{ padding: '10px', borderBottom: '1px solid gray', cursor: 'pointer' }}>
-                                <strong>{s.title}</strong>
-                                <div style={{ fontSize: '10px', opacity: 0.7 }}>{new Date(s.timestamp).toLocaleString()}</div>
+                        {isLoadingHistory && sessions.length === 0 ? (
+                            <div style={{ textAlign: 'center', marginTop: '2rem', opacity: 0.7 }}>
+                                ⏳ Loading history...
                             </div>
-                        ))}
+                        ) : sessions.length === 0 ? (
+                            <div style={{ textAlign: 'center', marginTop: '2rem', opacity: 0.5 }}>
+                                No past sessions found.
+                            </div>
+                        ) : (
+                            sessions.map(s => (
+                                <div 
+                                    key={s.id} 
+                                    onClick={() => loadSession(s)} 
+                                    style={{ padding: '10px', borderBottom: '1px solid gray', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+                                >
+                                    <div>
+                                        <strong>{s.title}</strong>
+                                        <div style={{ fontSize: '10px', opacity: 0.7 }}>{new Date(s.timestamp).toLocaleString()}</div>
+                                    </div>
+                                    <button 
+                                        title="Delete session"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            vscode.postMessage({ command: 'deleteHistory', sessionId: s.id });
+                                        }}
+                                        style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '14px' }}
+                                    >
+                                        🗑️
+                                    </button>
+                                </div>
+                            ))
+                        )}
                     </div>
                 </div>
             )}

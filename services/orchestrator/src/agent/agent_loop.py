@@ -41,6 +41,7 @@ class Agent:
         self.search_config = config.get("search", {})
         self.auto_approve = False
         self.user_inbox = asyncio.Queue()
+        self.state = AgentState(user_goal="")
         
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
@@ -120,14 +121,19 @@ class Agent:
                     f"reasoning stays on flagship."
                 )
 
+        # Extract the store from the uds_server instance
+        message_store = uds_server.message_store if uds_server else None
+
         self.memory = SlidingContextManager(
             memory_config=memory_config,
             model_name=compaction_model_name,
             llm_provider=compaction_provider,
-            llm_config=llm_config,  # deprecated kwarg retained for backward-compat signature
+            llm_config=llm_config,
+            state=self.state,  # Assuming state injection is updated in ContextManager
+            max_tokens=memory_config.get("max_tokens", 6000),
+            summary_budget=4096,
+            message_store=message_store  # Inject here
         )
-
-        self.state = AgentState(user_goal="")
 
         # ------------------------------------------------------------------
         # AI Governance: Token Budgets (Economic Governance)
@@ -142,6 +148,22 @@ class Agent:
         self.token_budget: int = int(governance_config.get("token_budget", 0))  # 0 == unlimited
         self.cumulative_token_count: int = 0
         self._token_call_count: int = 0
+
+    async def _save_message(self, msg: Message, token_count: int = 0):
+        if self.uds_server and getattr(self.uds_server, 'message_store', None):
+            try:
+                # Serialize the content for SQLite so JSON.parse() in React works cleanly
+                content_json = json.dumps(msg.content)
+                role_str = msg.role.value if hasattr(msg.role, 'value') else str(msg.role)
+                await self.uds_server.message_store.append(
+                    session_id=self.state.run_id,
+                    seq=len(self.state.history) - 1,
+                    role=role_str,
+                    content_json=content_json,
+                    token_count=token_count
+                )
+            except Exception as e:
+                logger.error(f"SQLite DB Write Error: {e}")
 
     def _record_token_usage(
         self,
@@ -279,6 +301,11 @@ class Agent:
     ) -> AgentState:
         with tracer.start_as_current_span("agent_execution_loop") as parent_span:
             self.auto_approve = auto_approve
+
+            # --- Trigger Async DB Rehydration Before Generating Context ---
+            if getattr(self.memory, 'rehydrate', None):
+                 await self.memory.rehydrate()
+
             def log(msg: str):
                 if ui_callback:
                     ui_callback(msg)
@@ -301,34 +328,40 @@ class Agent:
                     elif ui_role == "user":
                         role_str = "user"
                     try:
-                        self.state.history.append(Message(
-                            role=Role(role_str), 
-                            content=msg_data.get("content", ""), 
-                            name=msg_data.get("name", "ui_rehydration")
-                        ))
+                        msg = Message(role=Role(role_str), content=msg_data.get("content", ""), name=msg_data.get("name", "ui_rehydration"))
+                        self.state.history.append(msg)
+                        await self._save_message(msg)
                     except ValueError:
                         continue
 
+            self.state.is_complete = False
+            self.state.is_canceled = False
             if user_goal:
                 is_followup = len(self.state.history) > 0
                 if not is_followup:
+                    # Preserve self.state.run_id during session restoration.
+                    current_run_id = self.state.run_id
+                    self.state = AgentState(user_goal=user_goal) 
+                    self.state.run_id = current_run_id
+
                     self.state.user_goal = user_goal
-                    self.state.is_complete = False
-                    self.state.is_canceled = False
                     self.state.iterations = 0
                     self.state.max_iterations = self.max_iterations 
                     self.state.summary = ""
-                    self.state.run_id = str(uuid.uuid4())
+                    # Generate a new UUID only if one wasn't injected from the UI
+                    if not self.state.run_id:
+                        self.state.run_id = str(uuid.uuid4())
+
                     self.state.workflow_context = None
                     log(f"[bold cyan]\U0001f680 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
                 else:
-                    self.state.is_complete = False 
-                    self.state.is_canceled = False
                     self.state.iterations = 0
                     self.state.max_iterations = self.max_iterations
                     log(f"[bold cyan]\u25b6\ufe0f --- Continuing Agent Loop ---[/bold cyan]\nFollow-up: {user_goal}")
 
-                self.state.history.append(Message(role=Role.USER, content=user_goal))
+                msg = Message(role=Role.USER, content=user_goal)
+                self.state.history.append(msg)
+                await self._save_message(msg)
 
                 if workflow_config:
                     orch_cfg = workflow_config.get("orchestrator_config", {})
@@ -348,7 +381,9 @@ class Agent:
                             obs = await self.tool_registry.execute_tool_async(tool, args)
                         else:
                             obs = await self.dispatcher.execute_async(tool, args, auto_approve=True)
-                        self.state.history.append(Message(role=Role.TOOL, content=f"Pre-flight Observation: {obs}", name=tool))
+                        msg = Message(role=Role.TOOL, content=f"Pre-flight Observation: {obs}", name=tool)
+                        self.state.history.append(msg)
+                        await self._save_message(msg)
             else:
                 log("[bold cyan]\u25b6\ufe0f --- Resuming Agent Loop (No New Prompt) ---[/bold cyan]")
 
@@ -389,7 +424,9 @@ class Agent:
                         while not self.user_inbox.empty():
                             injected_msg = self.user_inbox.get_nowait()
                             formatted_input = f"\u26a0\ufe0f [User Input Interjected]: {injected_msg}"
-                            self.state.history.append(Message(role=Role.USER, content=formatted_input))
+                            msg = Message(role=Role.USER, content=formatted_input)
+                            self.state.history.append(msg)
+                            await self._save_message(msg)
                             log(f"\U0001f4e5 [System] Injected user input into context window.")
                         
                         # --- 1. Evaluate Reflection (No System Prompt Mutation) ---
@@ -447,13 +484,9 @@ class Agent:
                             log(clean_budget_msg)
                             self.state.is_complete = True
                             self.state.summary = clean_budget_msg
-                            self.state.history.append(
-                                Message(
-                                    role=Role.TOOL,
-                                    content=clean_budget_msg,
-                                    name="governance_budget_breaker",
-                                )
-                            )
+                            msg = Message(role=Role.TOOL, content=clean_budget_msg, name="governance_budget_breaker")
+                            self.state.history.append(msg)
+                            await self._save_message(msg)
                             iter_span.set_attribute("governance.budget_exceeded", True)
                             iter_span.set_attribute("governance.cumulative_token_count", int(self.cumulative_token_count))
                             iter_span.set_attribute("governance.token_budget", int(self.token_budget))
@@ -474,7 +507,9 @@ class Agent:
                             log("\U0001f6d1 [Agent] Task was manually cancelled by the user.")
                             break
 
-                        self.state.history.append(Message(role=Role.ASSISTANT, content=json.dumps(llm_response)))
+                        msg = Message(role=Role.ASSISTANT, content=json.dumps(llm_response))
+                        self.state.history.append(msg)
+                        await self._save_message(msg)
 
                         tool_name = llm_response.get("tool", "unknown")
                         tool_args = llm_response.get("tool_args", {})
@@ -526,7 +561,9 @@ class Agent:
                             summary = tool_args.get("summary", "Task completed successfully.")
                             log(f"[bold green]\u2705 [Task Complete][/bold green] {summary}")
                             self.state.summary = summary 
-                            self.state.history.append(Message(role=Role.TOOL, content=summary, name=tool_name))
+                            msg = Message(role=Role.TOOL, content=summary, name=tool_name)
+                            self.state.history.append(msg)
+                            await self._save_message(msg)
                             
                             success_flag = tool_args.get("success", True)
                             iter_span.set_attribute("task.success", success_flag)
@@ -583,7 +620,9 @@ class Agent:
                                 self.state.is_complete = True
                                 clean_error_msg = "Task aborted by system sandbox constraints. The requested action was blocked for security reasons."
                                 self.state.summary = clean_error_msg
-                                self.state.history.append(Message(role=Role.TOOL, content=self.state.summary, name="finish_task"))
+                                msg = Message(role=Role.TOOL, content=self.state.summary, name="finish_task")
+                                self.state.history.append(msg)
+                                await self._save_message(msg)
                                 
                                 iter_span.set_attribute("error", True)
                                 iter_span.set_attribute("error.message", "Sandbox constraint violation")
@@ -622,7 +661,9 @@ class Agent:
                                 "no such directory",
                             )
                         )
-                        self.state.history.append(Message(role=Role.TOOL, content=str(observation), name=tool_name, is_noise=is_noise))
+                        msg = Message(role=Role.TOOL, content=str(observation), name=tool_name, is_noise=is_noise)
+                        self.state.history.append(msg)
+                        await self._save_message(msg)
                         if is_noise:
                             logger.debug(f"[Noise-Tag] Observation from '{tool_name}' flagged as noise for pre-compaction filtering.")
                         self.state.iterations += 1

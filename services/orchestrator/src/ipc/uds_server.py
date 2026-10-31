@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import datetime
 
 # 1. Grab the current fallback path
 workspace_root = os.getcwd()
@@ -73,6 +74,7 @@ from services.orchestrator.src.agent.agent_loop import Agent, Message, Role
 from services.orchestrator.src.llm.provider import UniversalLLMProvider
 from services.orchestrator.src.llm.tracing import setup_phoenix_tracing
 from services.orchestrator.src.logging.log_filter import scrub_secrets_from_string, SecretRedactingFilter
+from services.orchestrator.src.memory.persistence import MessageStore
 
 from opentelemetry import trace
 tracer = trace.get_tracer(__name__)
@@ -234,15 +236,19 @@ def get_resource_path(relative_path: str) -> str:
 class JsonRpcUdsServer:
     """JSON-RPC 2.0 Server over TCP."""
     
-    def __init__(self, host: str = '127.0.0.1', port: int = 7777):
+    def __init__(self, workspace_root: str = '.', host: str = '127.0.0.1', port: int = 7777):
         self.host = host
         self.port = port
         self.config = load_config()
         setup_logging(self.config)
         self.running = False
         self.notification_handlers = {}
+        self.workspace_root = workspace_root
         logger.info("Initializing LanceDB Vector Store...")
         self.vector_store = LocalVectorStore(workspace_root=workspace_root, config=self.config)
+        logger.info("Initializing SQLite Message Store...")
+        db_path = Path(workspace_root) / ".agentic_workspace" / "db" / "orchestrator.db"
+        self.message_store = MessageStore(db_path=db_path)
         self.pending_requests = {}
         self.active_writer = None
         self.persistent_agent = None
@@ -546,6 +552,121 @@ class JsonRpcUdsServer:
                 self.persistent_agent.auto_approve = new_state
                 logger.info(f"⚙️ Mid-task auto-approve set to: {new_state}")
                 return self._success_response(req_id, {"status": "success", "auto_approve": new_state})
+            elif method == "fetch_history":
+                session_id = params.get("session_id")
+                db_path = Path(self.workspace_root) / ".agentic_workspace" / "db" / "orchestrator.db"
+                if db_path.exists() and session_id:
+                    import sqlite3
+                    conn = sqlite3.connect(str(db_path))
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT role, content, token_count, created_at 
+                        FROM messages 
+                        WHERE session_id = ? 
+                        ORDER BY seq ASC
+                    """, (session_id,))
+                    rows = [dict(row) for row in cursor.fetchall()]
+                    conn.close()
+                    return self._success_response(req_id, {"status": "success", "history": rows})
+                else:
+                    return self._success_response(req_id, {"status": "success", "history": []})
+            elif method == "load_history_list":
+                query_str = params.get("query", "").strip()
+                db_path = Path(self.workspace_root) / ".agentic_workspace" / "db" / "orchestrator.db"
+                if db_path.exists():
+                    import sqlite3
+                    conn = sqlite3.connect(str(db_path))
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    
+                    if query_str:
+                        # Find session IDs matching the search query
+                        search_cursor = conn.cursor()
+                        search_cursor.execute("""
+                            SELECT DISTINCT session_id
+                            FROM messages
+                            WHERE content LIKE ? AND session_id IS NOT NULL AND session_id != ''
+                        """, (f"%{query_str}%",))
+                        matching_ids = {row["session_id"] for row in search_cursor.fetchall()}
+                        
+                        if not matching_ids:
+                            conn.close()
+                            return self._success_response(req_id, {"status": "success", "sessions": []})
+                            
+                        placeholders = ','.join(['?'] * len(matching_ids))
+                        cursor.execute(f"""
+                            SELECT session_id, MAX(created_at) as timestamp
+                            FROM messages
+                            WHERE session_id IN ({placeholders})
+                            GROUP BY session_id
+                            ORDER BY timestamp DESC
+                            LIMIT 50
+                        """, list(matching_ids))
+                    else:
+                        cursor.execute("""
+                            SELECT session_id, MAX(created_at) as timestamp
+                            FROM messages
+                            WHERE session_id IS NOT NULL AND session_id != ''
+                            GROUP BY session_id
+                            ORDER BY timestamp DESC
+                            LIMIT 50
+                        """)
+                        
+                    raw_sessions = cursor.fetchall()
+                    
+                    sessions = []
+                    for row in raw_sessions:
+                        sid = row["session_id"]
+                        timestamp = row["timestamp"]
+                        
+                        cursor.execute("""
+                            SELECT content FROM messages 
+                            WHERE session_id = ? AND role = 'user' 
+                            ORDER BY seq ASC LIMIT 1
+                        """, (sid,))
+                        first_msg = cursor.fetchone()
+                        
+                        title = f"Session {sid[:8]}..."
+                        if first_msg and first_msg["content"]:
+                            try:
+                                content_data = json.loads(first_msg["content"])
+                                text_val = content_data.get("text") or str(content_data)
+                                title = text_val[:30] + ('...' if len(text_val) > 30 else '')
+                            except Exception:
+                                title = str(first_msg["content"])[:30]
+                                
+                        try:
+                            epoch = int(datetime.datetime.strptime(timestamp.replace('Z', ''), "%Y-%m-%dT%H:%M:%S.%f").timestamp() * 1000)
+                        except Exception:
+                            try:
+                                epoch = int(datetime.datetime.strptime(timestamp.replace('Z', ''), "%Y-%m-%dT%H:%M:%S").timestamp() * 1000)
+                            except Exception:
+                                epoch = 0
+                                
+                        sessions.append({
+                            "id": sid,
+                            "title": title,
+                            "timestamp": epoch
+                        })
+                        
+                    conn.close()
+                    return self._success_response(req_id, {"status": "success", "sessions": sessions})
+                else:
+                    return self._success_response(req_id, {"status": "success", "sessions": []})
+            elif method == "delete_history":
+                session_id = params.get("session_id")
+                db_path = Path(self.workspace_root) / ".agentic_workspace" / "db" / "orchestrator.db"
+                if db_path.exists() and session_id:
+                    import sqlite3
+                    conn = sqlite3.connect(str(db_path))
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+                    conn.commit()
+                    conn.close()
+                    return self._success_response(req_id, {"status": "success", "session_id": session_id})
+                else:
+                    return self._success_response(req_id, {"status": "success", "deleted": False})
             elif method == "inject_message":
                 if not self.persistent_agent:
                     return self._error_response(req_id, -32000, "No active agent session.")
@@ -574,21 +695,15 @@ class JsonRpcUdsServer:
                 return self._success_response(req_id, {"status": "cleared"})
                 
             elif method == "restore_session":
-                self._ensure_agent()
+                session_id = params.get("session_id")
+                if not session_id:
+                    return self._error_response(req_id, -32602, "session_id is required to restore state.")
                 
-                # Map React UI messages to Python backend Role messages
-                restored_history = []
-                for msg in params.get("history", []):
-                    role_str = msg.get("role")
-                    content = msg.get("content", "")
-                    if role_str == "error":
-                        continue  # Skip local UI errors
-                        
-                    # Map the frontend 'agent' role to the backend Role.ASSISTANT enum
-                    backend_role = Role.ASSISTANT if role_str == "agent" else Role.USER
-                    restored_history.append(Message(role=backend_role, content=content))
-                self.persistent_agent.state.history = restored_history
-                logger.info(f"⏪ Restored {len(restored_history)} messages to agent memory.")
+                self._ensure_agent()
+                self.persistent_agent.state.run_id = session_id
+                
+                # The agent loop will automatically call context_manager.rehydrate() 
+                # when it runs, pulling the untrimmed trajectory directly from disk!
                 return self._success_response(req_id, {"status": "restored"})
 
             elif method == "create_profile":
@@ -682,9 +797,19 @@ class JsonRpcUdsServer:
 
     async def start(self):
         """Binds the TCP socket."""
+        # Open the global database connection before serving clients
+        # Here to populate the history list ASAP
+        await self.message_store.open()
+
         # 🧹 Run startup database reconciliation in a background thread
         logger.info("Starting database reconciliation sweep...")
         await asyncio.to_thread(self.vector_store.reconcile_database)
+
+        # 🗄️ Run session archival sweep (Sessions older than 14 days)
+        archive_db = Path(workspace_root) / ".agentic_workspace" / "db" / "orchestrator_archive.db"
+        archived_count = await self.message_store.archive_inactive_sessions(retention_days=14, archive_path=archive_db)
+        if archived_count > 0:
+            logger.info(f"Archived {archived_count} stale message rows to {archive_db.name}")
 
         # Start the background sync worker
         self.sync_task = asyncio.create_task(self._sync_worker())
@@ -697,6 +822,9 @@ class JsonRpcUdsServer:
         logger.info(f"🔌 TCP JSON-RPC Server listening on {self.host}:{self.port}")
         async with server:
             await server.serve_forever()
+
+        # Add cleanup (if server_forever breaks)
+        await self.message_store.close()
 
     def _handle_search_codebase(self, params: Dict[str, Any]) -> Dict[str, Any]:
         import time
@@ -809,13 +937,20 @@ async def handle_terminal_error(params: dict):
 
 if __name__ == "__main__":
     import sys
-    host = '127.0.0.1'
-    port = 7777
-    if "--port" in sys.argv:
-        idx = sys.argv.index("--port")
-        if idx + 1 < len(sys.argv):
-            port = int(sys.argv[idx + 1])
-    server = JsonRpcUdsServer(host=host, port=port)
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7777)
+    parser.add_argument("--workspace", default=".")
+    parser.add_argument("--global-config", default="")
+    args, unknown = parser.parse_known_args()
+
+    server = JsonRpcUdsServer(
+        host=args.host, 
+        port=args.port, 
+        workspace_root=args.workspace
+    )
     
     # Register the handler before starting the server
     server.register_notification_handler("terminal_error_detected", handle_terminal_error)

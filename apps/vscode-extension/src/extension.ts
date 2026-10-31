@@ -8,10 +8,10 @@ import { ASTProvider } from './ast/ASTProvider';
 import { AgentApprovalCodeLensProvider } from './codelens';
 import { AgenticDiffProvider } from './providers/DiffProvider';
 import { ChatViewProvider } from './providers/ChatViewProvider';
+import { SettingsPanelViewProvider } from './providers/SettingsPanelViewProvider';
 import { spawn, ChildProcess } from 'child_process';
 import { UdsClient } from './ipc/UdsClient';
 import { WarpProxyServer } from './proxy/WarpProxyServer';
-
 import * as net from 'net';
 
 async function getFreePort(): Promise<number> {
@@ -29,7 +29,6 @@ let udsClient: UdsClient;
 let proxyServer: WarpProxyServer;
 let statusBarItem: vscode.StatusBarItem;
 let backendProcess: ChildProcess | undefined;
-let settingsPanel: vscode.WebviewPanel | undefined; // Singleton
 const codeLensProvider = new AgentApprovalCodeLensProvider();
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -357,203 +356,8 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(configWatcher);
 
     // 4. Register the Settings UI Command
-    let disposableSettings = vscode.commands.registerCommand('localAgenticWorkspace.showSettings', async () => {
-        // Reveal if it already exists
-        if (settingsPanel) {
-            settingsPanel.reveal(vscode.ViewColumn.One);
-            return;
-        }
-
-        // Create it if it doesn't exist
-        settingsPanel = vscode.window.createWebviewPanel(
-            'agentSettings',
-            'Agentic Workspace Settings',
-            vscode.ViewColumn.One,
-            {
-                enableScripts: true, 
-                localResourceRoots: [vscode.Uri.file(path.join(context.extensionPath, 'out'))]
-            }
-        );
-
-        // Clean up the reference when the user closes the tab
-        settingsPanel.onDidDispose(() => {
-            settingsPanel = undefined;
-        });
-
-        const scriptPathOnDisk = vscode.Uri.file(path.join(context.extensionPath, 'out', 'webview.js'));
-        const scriptUri = settingsPanel.webview.asWebviewUri(scriptPathOnDisk);
-
-        // Fetch models from the local Ollama API
-        const fetchModels = (): Promise<string[]> => {
-            return new Promise((resolve) => {
-                const req = http.get('http://127.0.0.1:11434/api/tags', (res) => {
-                    let data = '';
-                    res.on('data', chunk => data += chunk);
-                    res.on('end', () => {
-                        try {
-                            const parsed = JSON.parse(data);
-                            const models = parsed.models.map((m: any) => m.name);
-                            resolve(models);
-                        } catch (e) {
-                            console.error('Failed to parse models', e);
-                            resolve(['llama3:8b', 'qwen2.5-coder:7b']); // Fallback defaults
-                        }
-                    });
-                }).on('error', (e) => {
-                    console.error('Failed to reach local LLM API', e);
-                    resolve(['llama3:8b', 'qwen2.5-coder:7b']); // Fallback defaults
-                });
-
-                // Force a resolution if the daemon hangs
-                req.setTimeout(2000, () => {
-                    req.destroy();
-                    resolve(['llama3:8b', 'qwen2.5-coder:7b']);
-                });
-            });
-        };
-
-        settingsPanel.webview.html = `
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Settings</title>
-            </head>
-            <body>
-                <div id="root"></div>
-                <script src="${scriptUri}"></script>
-            </body>
-            </html>
-        `;
-
-        settingsPanel.webview.onDidReceiveMessage(async (message) => {
-            if (message.command === 'ready') {
-                const availableModels = await fetchModels();
-                let configData = null;
-                try {
-                    configData = await udsClient.request('get_config', {});
-                } catch (error: any) {
-                    console.error('Failed to fetch config from backend:', error);
-                }
-
-                // Fallback for missing or empty config
-                if (!configData || Object.keys(configData).length === 0 || !configData.profiles) {
-                    configData = {
-                        active_profile: 'home',
-                        profiles: {
-                            home: {
-                                llm: { model_name: 'llama3:8b', endpoint_url: 'http://127.0.0.1:11434/v1/chat/completions' }
-                            }
-                        }
-                    };
-                }
-
-                if (configData && configData.profiles) {
-                    Object.values(configData.profiles).forEach((profile: any) => {
-                        const savedModel = profile?.llm?.model_name || profile?.llm?.model;
-                        if (savedModel && !availableModels.includes(savedModel)) {
-                            availableModels.push(savedModel);
-                        }
-                    });
-                }
-
-                // 🎯 Send everything in a unified initialization payload to prevent hanging
-                settingsPanel?.webview.postMessage({ 
-                    command: 'loadInitialData', 
-                    models: availableModels,
-                    specs: modelSpecs,
-                    config: configData
-                });
-
-                const tavilyKey = await context.secrets.get('tavily_api_key');
-                const braveKey = await context.secrets.get('brave_api_key');
-
-                settingsPanel?.webview.postMessage({
-                    command: 'loadSecrets',
-                    secrets: {
-                        tavily: tavilyKey ? '••••••••••••••••' : '',
-                        brave: braveKey ? '••••••••••••••••' : ''
-                    }
-                });
-            } else if (message.command === 'updateSetting') {
-                try {
-                    await udsClient.request('update_config', message.config);
-                    vscode.window.showInformationMessage('Settings successfully synced to Orchestrator!');
-                } catch (error: any) {
-                    vscode.window.showErrorMessage(`Failed to sync settings: ${error.message}`);
-                }
-            } else if (message.command === 'scanModelsFromPath') {
-                try {
-                    // Extract path safely, handling different potential message structures
-                    let targetPath = message.path || (message.data && message.data.path) || message.models_path;
-                    
-                    if (!targetPath) {
-                        throw new Error("No path provided to scan.");
-                    }
-
-                    // Manually expand the tilde to the user's home directory
-                    if (targetPath.startsWith('~')) {
-                        // Remove the '~/' so path.join works cleanly without double slashes
-                        const cleanPath = targetPath.startsWith('~/') ? targetPath.slice(2) : targetPath.slice(1);
-                        targetPath = path.join(os.homedir(), cleanPath);
-                    }
-
-                    const models: string[] = [];
-                    const families = fs.readdirSync(targetPath, { withFileTypes: true });
-                    
-                    for (const family of families) {
-                        if (family.isDirectory() && !family.name.startsWith('.')) {
-                            const familyPath = path.join(targetPath, family.name);
-                            const tags = fs.readdirSync(familyPath, { withFileTypes: true });
-                            
-                            for (const tag of tags) {
-                                if (tag.isFile() && !tag.name.startsWith('.')) {
-                                    // Concatenates the folder name and file name into the canonical Ollama tag
-                                    models.push(`${family.name}:${tag.name}`);
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Send the fully-qualified deployment names back to the React UI
-                    settingsPanel?.webview.postMessage({ command: 'loadModels', models: models });
-                } catch (error: any) {
-                    settingsPanel?.webview.postMessage({ 
-                        command: 'agentError', 
-                        text: `Failed to scan directory: ${error.message}` 
-                    });
-                }
-            } else if (message.command === 'createProfile') {
-                try {
-                    await udsClient.request('create_profile', {
-                        profile_name: message.profileName,
-                        profile_data: message.profileData
-                    });
-                    vscode.window.showInformationMessage(`Profile '${message.profileName}' created successfully!`);
-                    
-                    // Small delay to ensure disk write consistency before refreshing
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                    const freshConfig = await udsClient.request('get_config', {});
-                    settingsPanel?.webview.postMessage({ command: 'loadConfig', config: freshConfig });
-                } catch (error: any) {
-                    vscode.window.showErrorMessage(`Failed to create profile: ${error.message}`);
-                }
-            } else if (message.command === 'deleteProfile') {
-                try {
-                    await udsClient.request('delete_profile', { profile_name: message.profileName });
-                    vscode.window.showInformationMessage(`Profile '${message.profileName}' deleted.`);
-                    
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                    const freshConfig = await udsClient.request('get_config', {});
-                    settingsPanel?.webview.postMessage({ command: 'loadConfig', config: freshConfig });
-                } catch (error: any) {
-                    vscode.window.showErrorMessage(`Failed to delete profile: ${error.message}`);
-                }
-            } else if (message.command === 'storeSecret') {
-                await context.secrets.store(message.key, message.value);
-            }
-        });
+    let disposableSettings = vscode.commands.registerCommand('localAgenticWorkspace.showSettings', () => {
+        SettingsPanelViewProvider.createOrShow(context, udsClient);
     });
     context.subscriptions.push(disposableSettings);
 
@@ -762,7 +566,8 @@ async function indexWorkspaceOnLoad(udsClient: UdsClient) {
     // Find all relevant source files, ignoring build/node_modules directories
     const files = await vscode.workspace.findFiles(
         '**/*.{ts,tsx,py,js,md,json}',
-        '**/{node_modules,out,dist,.git,.lancedb,.venv}/**'
+        // Add .agentic_workspace to the exclusion list to prevent the agent from indexing its own database/logs
+        '**/{node_modules,out,dist,.git,.agentic_workspace,.venv}/**' 
     );
 
     console.log(`🚀 Starting initial workspace index: ${files.length} files found.`);
@@ -822,16 +627,15 @@ function syncConfigState() {
     // 1. Always update the status bar 
     updateStatusBar();
 
-    // 2. If the Settings tab is open, push the new disk state to the React UI
-    if (settingsPanel) {
+    // 2. If the Settings tab is open, push the new disk state to the React UI via the singleton
+    if (SettingsPanelViewProvider.currentPanel) {
         try {
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (workspaceFolders) {
                 const configPath = path.join(workspaceFolders[0].uri.fsPath, '.agentic_config.json');
                 if (fs.existsSync(configPath)) {
                     const configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-                    // React is already listening for 'loadConfig' in SettingsPanel.tsx
-                    settingsPanel.webview.postMessage({ command: 'loadConfig', config: configData });
+                    SettingsPanelViewProvider.currentPanel.postMessage({ command: 'loadConfig', config: configData });
                 }
             }
         } catch (err) {

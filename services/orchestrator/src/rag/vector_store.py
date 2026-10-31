@@ -19,8 +19,8 @@ class LocalVectorStore:
         self.config = config or {}
         # 1. Initialize LanceDB
         self.workspace_root = workspace_root or os.getcwd()
-        db_path = os.path.join(self.workspace_root, ".lancedb") 
-        self.db = lancedb.connect(db_path)
+        lancedb_path = os.path.join(workspace_root, ".agentic_workspace", "vector_store")
+        self.db = lancedb.connect(lancedb_path)
         self.table_name = "codebase"
         
         schema = pa.schema([
