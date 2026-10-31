@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.19.8](https://github.com/qcbit/local-agentic-workspace/compare/v0.19.7...v0.19.8) (2026-10-31)
+
+
+### Bug Fixes
+
+* **CI:** Ignore tests ([e3fd904](https://github.com/qcbit/local-agentic-workspace/commit/e3fd9044ceca115bb41ca34bad023680d710e4b2))
+* **CI:** trigger manual release build ([b878fbf](https://github.com/qcbit/local-agentic-workspace/commit/b878fbf18835623e9d5a7a679e3dec21c36ddab0))
+
 ## [0.19.7](https://github.com/qcbit/local-agentic-workspace/compare/v0.19.6...v0.19.7) (2026-10-31)
 
 
