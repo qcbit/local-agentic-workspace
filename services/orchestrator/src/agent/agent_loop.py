@@ -304,7 +304,7 @@ class Agent:
 
             # --- Trigger Async DB Rehydration Before Generating Context ---
             if getattr(self.memory, 'rehydrate', None):
-                 await self.memory.rehydrate()
+                await self.memory.rehydrate()
 
             def log(msg: str):
                 if ui_callback:
@@ -312,10 +312,19 @@ class Agent:
                 else:
                     logger.info(msg)
 
+            # Only fall back to UI history_payload if SQLite rehydration yielded no history
             if history_payload and not self.state.history:
                 log("\U0001f504 [System] Restoring session context from UI...")
                 self.state.user_goal = history_payload[0].get("content", "") if history_payload else user_goal
                 
+                # Check if this session_id already has rows in SQLite to avoid duplicate inserts
+                existing_max_seq = None
+                if self.uds_server and getattr(self.uds_server, 'message_store', None) and self.state.run_id:
+                    try:
+                        existing_max_seq = await self.uds_server.message_store.max_seq(self.state.run_id)
+                    except Exception:
+                        existing_max_seq = None
+
                 for msg_data in history_payload:
                     ui_role = msg_data.get("role", "user").lower()
                     if ui_role == "thought":
@@ -330,7 +339,8 @@ class Agent:
                     try:
                         msg = Message(role=Role(role_str), content=msg_data.get("content", ""), name=msg_data.get("name", "ui_rehydration"))
                         self.state.history.append(msg)
-                        await self._save_message(msg)
+                        if existing_max_seq is None:
+                            await self._save_message(msg)
                     except ValueError:
                         continue
 
@@ -342,17 +352,17 @@ class Agent:
                     # Preserve self.state.run_id during session restoration.
                     current_run_id = self.state.run_id
                     self.state = AgentState(user_goal=user_goal) 
-                    self.state.run_id = current_run_id
-
+                    self.state.run_id = current_run_id or str(uuid.uuid4())
                     self.state.user_goal = user_goal
                     self.state.iterations = 0
                     self.state.max_iterations = self.max_iterations 
                     self.state.summary = ""
-                    # Generate a new UUID only if one wasn't injected from the UI
-                    if not self.state.run_id:
-                        self.state.run_id = str(uuid.uuid4())
-
                     self.state.workflow_context = None
+
+                    # 🎯 Keep SlidingContextManager's state reference synchronized!
+                    if getattr(self, "memory", None) is not None:
+                        self.memory.state = self.state
+
                     log(f"[bold cyan]\U0001f680 --- Starting Agent Loop ---[/bold cyan]\nGoal: {user_goal}")
                 else:
                     self.state.iterations = 0

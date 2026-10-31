@@ -39,15 +39,18 @@ export const ChatPanel: React.FC = () => {
 
     useEffect(() => {
         vscode.setState({
+            sessions,
+            currentSessionId,
             messages,
             input,
             isAutoApprove,
             isLoading
         });
-    }, [messages, input, isAutoApprove, isLoading]);
+    }, [sessions, currentSessionId, messages, input, isAutoApprove, isLoading]);
 
     useEffect(() => {
         if (isHistoryOpen) {
+            setIsLoadingHistory(true);
             // Debounce the SQLite search slightly
             const timeoutId = setTimeout(() => {
                 vscode.postMessage({ command: 'loadHistoryList', query: searchQuery });
@@ -166,6 +169,7 @@ export const ChatPanel: React.FC = () => {
         
         vscode.postMessage({
             command: 'executeTask',
+            sessionId: currentSessionId,
             goal: input,
             autoApprove: isAutoApprove,
             messages: currentHistory // 🎯 Forward the UI history to the extension host
@@ -279,6 +283,9 @@ export const ChatPanel: React.FC = () => {
                                         onClick={(e) => {
                                             e.stopPropagation();
                                             vscode.postMessage({ command: 'deleteHistory', sessionId: s.id });
+                                            if (s.id === currentSessionId) {
+                                                handleNewChat();
+                                            }
                                         }}
                                         style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '14px' }}
                                     >
