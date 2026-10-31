@@ -28,6 +28,8 @@
     ".vscode-test",
     "out", 
     "src/test",
+    "**/*.test.ts",
+    "**/*.test.tsx",
   ],
   "include": [
     "src/**/*"
