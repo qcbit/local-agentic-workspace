@@ -50,6 +50,10 @@ jobs:
         with:
           node-version: 22
 
+      - name: Add MSBuild to PATH
+        if: matrix.os == 'windows-latest'
+        uses: microsoft/setup-msbuild@v2
+
       - name: Install Node Dependencies
         run: |
           cd apps/vscode-extension
