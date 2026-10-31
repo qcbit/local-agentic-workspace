@@ -69,7 +69,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.command || data.type) {
                 case 'executeTask':
-                    await this._executeTask(data.goal, data.autoApprove ?? false, data.messages || []);
+                    await this._executeTask(data.goal, data.autoApprove ?? false, data.messages || [], data.sessionId);
                     break;
                 case 'stop_agent':
                     console.log("🛑 Received stop signal from UI. Routing to IPC...");
@@ -156,11 +156,57 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private async handleFetchHistory(webview: vscode.Webview, sessionId: string) {
         try {
             const response = await this._udsClient.request('fetch_history', { session_id: sessionId });
-            const parsedRows = (response.history || []).map((row: any) => ({
-                ...row,
-                content: typeof row.content === 'string' ? JSON.parse(row.content) : row.content
-            }));
-            webview.postMessage({ command: 'historyData', history: parsedRows });
+            const rawRows = response.history || [];
+            const uiMessages: { role: string; content: string }[] = [];
+
+            for (let i = 0; i < rawRows.length; i++) {
+                const row = rawRows[i];
+                let parsedContent = row.content;
+                if (typeof row.content === 'string') {
+                    try {
+                        parsedContent = JSON.parse(row.content);
+                    } catch {
+                        parsedContent = row.content;
+                    }
+                }
+
+                if (row.role === 'user') {
+                    const text = typeof parsedContent === 'object' && parsedContent !== null
+                        ? (parsedContent.text || JSON.stringify(parsedContent))
+                        : String(parsedContent);
+                    uiMessages.push({ role: 'user', content: text });
+                } else if (row.role === 'assistant') {
+                    // Extract the inner monologue reasoning from the assistant JSON turn
+                    let obj = parsedContent;
+                    if (typeof obj === 'string') {
+                        try { obj = JSON.parse(obj); } catch { obj = null; }
+                    }
+                    if (obj && typeof obj === 'object' && obj.reasoning) {
+                        uiMessages.push({ role: 'thought', content: String(obj.reasoning) });
+                    }
+                } else if (row.role === 'tool') {
+                    // Check if the preceding assistant turn invoked 'finish_task'
+                    let isFinishTask = false;
+                    if (i > 0 && rawRows[i - 1].role === 'assistant') {
+                        try {
+                            const prevContent = typeof rawRows[i - 1].content === 'string'
+                                ? JSON.parse(rawRows[i - 1].content)
+                                : rawRows[i - 1].content;
+                            const prevObj = typeof prevContent === 'string' ? JSON.parse(prevContent) : prevContent;
+                            if (prevObj && prevObj.tool === 'finish_task') {
+                                isFinishTask = true;
+                            }
+                        } catch {}
+                    }
+                    // Render final answers or terminal errors in the chat stream
+                    const text = typeof parsedContent === 'string' ? parsedContent : JSON.stringify(parsedContent);
+                    if (isFinishTask || i === rawRows.length - 1) {
+                        uiMessages.push({ role: 'agent', content: text });
+                    }
+                }
+            }
+
+            webview.postMessage({ command: 'historyData', history: uiMessages });
         } catch (error: any) {
             webview.postMessage({ command: 'historyData', history: [], error: error.message });
         }
@@ -169,7 +215,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     /**
      * Executes an agent task via the IPC socket and returns the result to the UI.
      */
-    private async _executeTask(goal: string, autoApprove: boolean = false, chatHistory: any[] = []) {
+    private async _executeTask(goal: string, autoApprove: boolean = false, chatHistory: any[] = [], sessionId?: string) {
         if (!this._view) return;
 
         let cleanGoal = goal;
@@ -200,6 +246,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         try {
             // 4. Bundle the JSON into the UDS payload
             const payload = {
+                session_id: sessionId,
                 goal: cleanGoal,
                 auto_approve: autoApprove,
                 workflow_config: workflowConfig, // This now reliably contains the workspace_root

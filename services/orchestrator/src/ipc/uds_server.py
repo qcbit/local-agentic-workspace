@@ -465,13 +465,15 @@ class JsonRpcUdsServer:
 
                 workflow_config = params.get("workflow_config", None)
                 history_payload = params.get("history", [])
+                session_id = params.get("session_id", None)
                 
                 try:
                     result_state = await self._run_agent_async(
                         goal, 
                         auto_approve=is_auto_approve, 
                         workflow_config=workflow_config, 
-                        history=history_payload
+                        history=history_payload,
+                        session_id=session_id
                     )
                     
                     if not result_state.is_complete and not result_state.is_canceled:
@@ -556,18 +558,19 @@ class JsonRpcUdsServer:
                 session_id = params.get("session_id")
                 db_path = Path(self.workspace_root) / ".agentic_workspace" / "db" / "orchestrator.db"
                 if db_path.exists() and session_id:
-                    import sqlite3
-                    conn = sqlite3.connect(str(db_path))
-                    conn.row_factory = sqlite3.Row
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        SELECT role, content, token_count, created_at 
-                        FROM messages 
-                        WHERE session_id = ? 
-                        ORDER BY seq ASC
-                    """, (session_id,))
-                    rows = [dict(row) for row in cursor.fetchall()]
-                    conn.close()
+                    def _sync_fetch():
+                        import sqlite3
+                        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+                            conn.row_factory = sqlite3.Row
+                            cursor = conn.cursor()
+                            cursor.execute("""
+                                SELECT role, content, token_count, created_at 
+                                FROM messages 
+                                WHERE session_id = ? 
+                                ORDER BY seq ASC
+                            """, (session_id,))
+                            return [dict(row) for row in cursor.fetchall()]
+                    rows = await asyncio.to_thread(_sync_fetch)
                     return self._success_response(req_id, {"status": "success", "history": rows})
                 else:
                     return self._success_response(req_id, {"status": "success", "history": []})
@@ -575,82 +578,68 @@ class JsonRpcUdsServer:
                 query_str = params.get("query", "").strip()
                 db_path = Path(self.workspace_root) / ".agentic_workspace" / "db" / "orchestrator.db"
                 if db_path.exists():
-                    import sqlite3
-                    conn = sqlite3.connect(str(db_path))
-                    conn.row_factory = sqlite3.Row
-                    cursor = conn.cursor()
-                    
-                    if query_str:
-                        # Find session IDs matching the search query
-                        search_cursor = conn.cursor()
-                        search_cursor.execute("""
-                            SELECT DISTINCT session_id
-                            FROM messages
-                            WHERE content LIKE ? AND session_id IS NOT NULL AND session_id != ''
-                        """, (f"%{query_str}%",))
-                        matching_ids = {row["session_id"] for row in search_cursor.fetchall()}
-                        
-                        if not matching_ids:
-                            conn.close()
-                            return self._success_response(req_id, {"status": "success", "sessions": []})
-                            
-                        placeholders = ','.join(['?'] * len(matching_ids))
-                        cursor.execute(f"""
-                            SELECT session_id, MAX(created_at) as timestamp
-                            FROM messages
-                            WHERE session_id IN ({placeholders})
-                            GROUP BY session_id
-                            ORDER BY timestamp DESC
-                            LIMIT 50
-                        """, list(matching_ids))
-                    else:
-                        cursor.execute("""
-                            SELECT session_id, MAX(created_at) as timestamp
-                            FROM messages
-                            WHERE session_id IS NOT NULL AND session_id != ''
-                            GROUP BY session_id
-                            ORDER BY timestamp DESC
-                            LIMIT 50
-                        """)
-                        
-                    raw_sessions = cursor.fetchall()
-                    
-                    sessions = []
-                    for row in raw_sessions:
-                        sid = row["session_id"]
-                        timestamp = row["timestamp"]
-                        
-                        cursor.execute("""
-                            SELECT content FROM messages 
-                            WHERE session_id = ? AND role = 'user' 
-                            ORDER BY seq ASC LIMIT 1
-                        """, (sid,))
-                        first_msg = cursor.fetchone()
-                        
-                        title = f"Session {sid[:8]}..."
-                        if first_msg and first_msg["content"]:
-                            try:
-                                content_data = json.loads(first_msg["content"])
-                                text_val = content_data.get("text") or str(content_data)
-                                title = text_val[:30] + ('...' if len(text_val) > 30 else '')
-                            except Exception:
-                                title = str(first_msg["content"])[:30]
-                                
-                        try:
-                            epoch = int(datetime.datetime.strptime(timestamp.replace('Z', ''), "%Y-%m-%dT%H:%M:%S.%f").timestamp() * 1000)
-                        except Exception:
-                            try:
-                                epoch = int(datetime.datetime.strptime(timestamp.replace('Z', ''), "%Y-%m-%dT%H:%M:%S").timestamp() * 1000)
-                            except Exception:
-                                epoch = 0
-                                
-                        sessions.append({
-                            "id": sid,
-                            "title": title,
-                            "timestamp": epoch
-                        })
-                        
-                    conn.close()
+                    def _sync_load_list():
+                        import sqlite3
+                        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+                            conn.row_factory = sqlite3.Row
+                            cursor = conn.cursor()
+                            if query_str:
+                                cursor.execute("""
+                                    SELECT DISTINCT session_id
+                                    FROM messages
+                                    WHERE content LIKE ? AND session_id IS NOT NULL AND session_id != ''
+                                """, (f"%{query_str}%",))
+                                matching_ids = {row["session_id"] for row in cursor.fetchall()}
+                                if not matching_ids:
+                                    return []
+                                placeholders = ','.join(['?'] * len(matching_ids))
+                                cursor.execute(f"""
+                                    SELECT session_id, MAX(created_at) as timestamp
+                                    FROM messages
+                                    WHERE session_id IN ({placeholders})
+                                    GROUP BY session_id
+                                    ORDER BY timestamp DESC
+                                    LIMIT 50
+                                """, list(matching_ids))
+                            else:
+                                cursor.execute("""
+                                    SELECT session_id, MAX(created_at) as timestamp
+                                    FROM messages
+                                    WHERE session_id IS NOT NULL AND session_id != ''
+                                    GROUP BY session_id
+                                    ORDER BY timestamp DESC
+                                    LIMIT 50
+                                """)
+                            raw_sessions = cursor.fetchall()
+                            sessions = []
+                            for row in raw_sessions:
+                                sid = row["session_id"]
+                                timestamp = row["timestamp"]
+                                cursor.execute("""
+                                    SELECT content FROM messages 
+                                    WHERE session_id = ? AND role = 'user' 
+                                    ORDER BY seq ASC LIMIT 1
+                                """, (sid,))
+                                first_msg = cursor.fetchone()
+                                title = f"Session {sid[:8]}..."
+                                if first_msg and first_msg["content"]:
+                                    try:
+                                        content_data = json.loads(first_msg["content"])
+                                        text_val = content_data.get("text") if isinstance(content_data, dict) else str(content_data)
+                                        title = text_val[:30] + ('...' if len(text_val) > 30 else '')
+                                    except Exception:
+                                        title = str(first_msg["content"])[:30]
+                                try:
+                                    epoch = int(datetime.datetime.strptime(timestamp.replace('Z', ''), "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=datetime.timezone.utc).timestamp() * 1000)
+                                except Exception:
+                                    try:
+                                        epoch = int(datetime.datetime.strptime(timestamp.replace('Z', ''), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp() * 1000)
+                                    except Exception:
+                                        epoch = 0
+                                sessions.append({"id": sid, "title": title, "timestamp": epoch})
+                            return sessions
+
+                    sessions = await asyncio.to_thread(_sync_load_list)
                     return self._success_response(req_id, {"status": "success", "sessions": sessions})
                 else:
                     return self._success_response(req_id, {"status": "success", "sessions": []})
@@ -658,12 +647,17 @@ class JsonRpcUdsServer:
                 session_id = params.get("session_id")
                 db_path = Path(self.workspace_root) / ".agentic_workspace" / "db" / "orchestrator.db"
                 if db_path.exists() and session_id:
-                    import sqlite3
-                    conn = sqlite3.connect(str(db_path))
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-                    conn.commit()
-                    conn.close()
+                    def _sync_delete():
+                        import sqlite3
+                        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+                            cursor.execute("DELETE FROM context_meta WHERE session_id = ?", (session_id,))
+                            conn.commit()
+                    await asyncio.to_thread(_sync_delete)
+                    if self.persistent_agent and getattr(self.persistent_agent.state, "run_id", None) == session_id:
+                        self.persistent_agent = None
+                        logger.info(f"🗑️ Active session {session_id} deleted; persistent agent cleared.")
                     return self._success_response(req_id, {"status": "success", "session_id": session_id})
                 else:
                     return self._success_response(req_id, {"status": "success", "deleted": False})
@@ -783,9 +777,18 @@ class JsonRpcUdsServer:
         # workspace_root is defined globally at the top of uds_server.py
         self.persistent_agent = Agent(llm_provider=llm, config=active_config, uds_server=self, workspace_root=workspace_root)
 
-    async def _run_agent_async(self, goal: str, auto_approve: bool = False, workflow_config: Optional[Dict[str, Any]] = None, history: list = None):
+    async def _run_agent_async(
+        self,
+        goal: str,
+        auto_approve: bool = False,
+        workflow_config: Optional[Dict[str, Any]] = None,
+        history: list = None,
+        session_id: Optional[str] = None
+    ):
         """Asynchronously instantiates and runs the agent."""
         self._ensure_agent()
+        if session_id and not self.persistent_agent.state.history:
+            self.persistent_agent.state.run_id = session_id
         state = await self.persistent_agent.run(goal, auto_approve=auto_approve, workflow_config=workflow_config, history_payload=history)
         return state
 
