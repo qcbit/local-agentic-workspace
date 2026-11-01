@@ -1,10 +1,8 @@
 import asyncio
 import json
-
 import os
-from services.orchestrator.src.llm.provider import UniversalLLMProvider
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
 from loguru import logger
@@ -12,9 +10,10 @@ from opentelemetry import trace
 
 # Import from refactored modules
 from services.orchestrator.src.agent.state import AgentState, Message, Role
+from services.orchestrator.src.llm.provider import UniversalLLMProvider
+from services.orchestrator.src.memory.context_manager import SlidingContextManager
 from services.orchestrator.src.tools.dispatcher import ToolDispatcher
 from services.orchestrator.src.tools.registry import ToolRegistry
-from services.orchestrator.src.memory.context_manager import SlidingContextManager
 
 tracer = trace.get_tracer(__name__)
 
@@ -33,7 +32,14 @@ class TokenBudgetExceededError(RuntimeError):
 
 
 class Agent:
-    def __init__(self, llm_provider, config: Dict[str, Any], uds_server=None, workspace_root: Optional[str] = None, permission_callback=None):
+    def __init__(
+        self,
+        llm_provider,
+        config: Dict[str, Any],
+        uds_server=None,
+        workspace_root: Optional[str] = None,
+        permission_callback=None,
+    ):
         self.llm_provider = llm_provider
         self.uds_server = uds_server
         self.workspace_root = workspace_root or os.getcwd()
@@ -42,46 +48,24 @@ class Agent:
         self.auto_approve = False
         self.user_inbox = asyncio.Queue()
         self.state = AgentState(user_goal="")
-        
+
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
         max_tokens = memory_config.get("max_tokens", 6000)
         dynamic_char_limit = int(max_tokens * 3.5 * 0.8)
-        
+
         self.dispatcher = ToolDispatcher(
-            uds_server=uds_server, 
+            uds_server=uds_server,
             workspace_root=self.workspace_root,
             permission_callback=permission_callback,
             sandbox_config=self.sandbox_config,
-            max_file_read_chars=dynamic_char_limit
-        )      
+            max_file_read_chars=dynamic_char_limit,
+        )
         self.tool_registry = ToolRegistry(uds_server=uds_server, config=config)
         self.max_iterations = config.get("max_iterations", 25)
-        
+
         # ------------------------------------------------------------------
         # AI Governance: Model Routing (Phase C)
-        # ------------------------------------------------------------------
-        # The reasoning loop keeps `self.llm_provider` (flagship model).
-        # Context compaction is a low-stakes task and is routed to a smaller,
-        # faster, cheaper model selected via the optional nested
-        # `llm.compaction` block:
-        #
-        #   "llm": {
-        #     "model_name": "qwen3.8",
-        #     "endpoint_url": "...",
-        #     "api_key": "...",
-        #     "compaction": { "model_name": "qwen2.5:1.5b" }
-        #   }
-        #
-        # Inheritance rules (locked in the design session):
-        #   - `endpoint_url` and `api_key` inherit from the parent llm block
-        #     when omitted in the compaction block, so operators only change
-        #     `model_name`.
-        #   - `chars_per_token` inherits from the parent llm block when
-        #     omitted.
-        #   - If no compaction block (or no `model_name`) is present, the
-        #     SlidingContextManager keeps using the flagship provider and
-        #     behavior is identical to the pre-routing build.
         # ------------------------------------------------------------------
         compaction_cfg: Dict[str, Any] = llm_config.get("compaction") or {}
         compaction_provider: Any = self.llm_provider  # default: flagship fallback
@@ -129,38 +113,37 @@ class Agent:
             model_name=compaction_model_name,
             llm_provider=compaction_provider,
             llm_config=llm_config,
-            state=self.state,  # Assuming state injection is updated in ContextManager
+            state=self.state,
             max_tokens=memory_config.get("max_tokens", 6000),
             summary_budget=4096,
-            message_store=message_store  # Inject here
+            message_store=message_store,
         )
 
         # ------------------------------------------------------------------
         # AI Governance: Token Budgets (Economic Governance)
-        # ------------------------------------------------------------------
-        # A running total of tokens consumed by THIS AGENT INSTANCE across
-        # every LLM call. When the cumulative total crosses the configured
-        # budget, `_record_token_usage` trips a circuit breaker so platform
-        # operators can see exactly when (and by which span) the limit was
-        # crossed.
         # ------------------------------------------------------------------
         governance_config = config.get("governance", {})
         self.token_budget: int = int(governance_config.get("token_budget", 0))  # 0 == unlimited
         self.cumulative_token_count: int = 0
         self._token_call_count: int = 0
 
+        # Anti-Loop Circuit Breaker State (Persisted across Resume)
+        self._call_counts: Dict[str, int] = {}
+        self._file_read_counts: Dict[str, int] = {}
+        self._visited_breadcrumbs: List[str] = []
+
     async def _save_message(self, msg: Message, token_count: int = 0):
-        if self.uds_server and getattr(self.uds_server, 'message_store', None):
+        if self.uds_server and getattr(self.uds_server, "message_store", None):
             try:
                 # Serialize the content for SQLite so JSON.parse() in React works cleanly
                 content_json = json.dumps(msg.content)
-                role_str = msg.role.value if hasattr(msg.role, 'value') else str(msg.role)
+                role_str = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
                 await self.uds_server.message_store.append(
                     session_id=self.state.run_id,
                     seq=len(self.state.history) - 1,
                     role=role_str,
                     content_json=content_json,
-                    token_count=token_count
+                    token_count=token_count,
                 )
             except Exception as e:
                 logger.error(f"SQLite DB Write Error: {e}")
@@ -173,35 +156,18 @@ class Agent:
     ) -> None:
         """Governance hook: enrich the current span with OpenInference token
         count attributes, update the cumulative counter, and trip the circuit
-        breaker if the corporate token budget has been exceeded.
-
-        OpenInference semantic conventions: https://github.com/Arize-ai/openinference
-        - llm.token_count.prompt
-        - llm.token_count.completion
-        - llm.token_count.total
-
-        These exact span attributes are read to compute per-call cost
-        against the model pricing table configured in the workspace settings.
-        """
+        breaker if the corporate token budget has been exceeded."""
         total = int(prompt_tokens) + int(completion_tokens)
 
-        # 1. Enrich the current OTLP span (Arize Phoenix shows these in the
-        #    "LLM Call" panel and uses them to compute $-cost per call).
-        active_span: trace.Span = (
-            span if span is not None
-            else trace.get_current_span()
-        )
+        active_span: trace.Span = span if span is not None else trace.get_current_span()
         if active_span.is_recording():
             active_span.set_attribute("llm.token_count.prompt", int(prompt_tokens))
             active_span.set_attribute("llm.token_count.completion", int(completion_tokens))
             active_span.set_attribute("llm.token_count.total", total)
 
-        # 2. Accumulate across the agent's lifecycle (the corporate view).
         self._token_call_count += 1
         self.cumulative_token_count += total
 
-        # 3. Emit the running total on the same span so Phoenix can show a
-        #    trend line of cumulative consumption independent of per-call cost.
         if active_span.is_recording():
             active_span.set_attribute("governance.cumulative_token_count", int(self.cumulative_token_count))
             active_span.set_attribute("governance.token_call_index", int(self._token_call_count))
@@ -213,7 +179,6 @@ class Agent:
             + (f" / budget={self.token_budget}" if self.token_budget else " / unlimited")
         )
 
-        # 4. Circuit breaker: abort further work before we waste more budget.
         if self.token_budget > 0 and self.cumulative_token_count > self.token_budget:
             if active_span.is_recording():
                 active_span.set_attribute("governance.budget_exceeded", True)
@@ -234,18 +199,67 @@ class Agent:
                 budget=self.token_budget,
             )
 
+    def _normalize_tool_signature(self, tool_name: str, tool_args: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+        """
+        Returns (exact_call_signature, target_file_path_if_read_only).
+        Maps both `file_system` reads and `terminal_proxy` grep/cat/sed/awk reads
+        to the same canonical file path so the model cannot bypass read limits by switching tools.
+        """
+        try:
+            canonical_args = json.dumps(tool_args, sort_keys=True)
+        except Exception:
+            canonical_args = str(tool_args)
+        exact_sig = f"{tool_name}:{canonical_args}"
+
+        target_file = None
+        if tool_name == "file_system" and tool_args.get("action") == "read":
+            raw_path = str(tool_args.get("path", "")).strip()
+            if raw_path:
+                target_file = os.path.normpath(raw_path)
+        elif tool_name == "terminal_proxy":
+            cmd = str(tool_args.get("command", "")).strip()
+            if re.search(r"\b(grep|cat|sed|awk|head|tail|rg)\b", cmd):
+                tokens = re.findall(r"[a-zA-Z0-9_.\-/]+\.[a-zA-Z0-9]+", cmd)
+                if tokens:
+                    target_file = os.path.normpath(tokens[-1])
+
+        return exact_sig, target_file
+
+    def _is_forbidden_shell_search(self, tool_name: str, tool_args: Dict[str, Any]) -> Optional[str]:
+        """Blocks terminal_proxy from being used as a file reader or codebase search tool."""
+        if tool_name != "terminal_proxy":
+            return None
+        cmd = str(tool_args.get("command", "")).strip()
+        if (
+            re.search(r"(?:^|&&|;|\|\|)\s*(grep|rg|cat|head|tail)\b", cmd)
+            or re.search(r"\|\s*(grep|rg)\b", cmd)
+        ):
+            # Allow `cat << 'EOF' > file` heredoc file creation if needed, but block pure reads
+            if not re.search(r"\bcat\s+<<", cmd):
+                return (
+                    "Error: Using `terminal_proxy` for `grep`, `cat`, `head`, or `tail` is disabled by the harness "
+                    "to prevent timeouts and context thrashing. Use `search_codebase` for searching or "
+                    "`file_system` (`action: 'read'`) to inspect files."
+                )
+        if (
+            re.search(r"(?:^|&&|;|\|\|)\s*(sed\s+-n|awk\b)", cmd)
+            or ("open(" in cmd and ".read()" in cmd)
+        ):
+            return (
+                "Error: Using `terminal_proxy` (`sed -n`, `awk`, or `python -c open().read()`) to read file snippets "
+                "is disabled. Use `file_system` (`action: 'read'`) instead."
+            )
+        return None
+
     async def reason(self, context: List[Dict[str, str]]) -> Dict[str, Any]:
         cptr: float = getattr(self.memory, "chars_per_token", 3.5)
         prompt_chars = sum(len(msg.get("content", "")) for msg in context)
         prompt_tokens = max(1, int(prompt_chars / cptr))
 
         with tracer.start_as_current_span("llm_call") as llm_span:
-            # --- Input-side attributes (known before the call) ---
             llm_span.set_attribute("llm.provider", type(self.llm_provider).__name__)
             llm_span.set_attribute("llm.token_count.prompt", int(prompt_tokens))
 
-            # --- Perform the LLM call INSIDE the active span so the
-            #     OpenAI auto-instrumentor nests its span beneath llm_call ---
             try:
                 raw_response = await asyncio.to_thread(self.llm_provider.generate, context)
             except Exception as exc:
@@ -257,7 +271,6 @@ class Agent:
                 llm_span.set_attribute("llm.token_count.total", int(prompt_tokens))
                 raise
 
-            # --- Output-side attributes (known after the call) ---
             completion_tokens = max(1, int(len(raw_response or "") / cptr))
             self._record_token_usage(
                 prompt_tokens=prompt_tokens,
@@ -269,7 +282,7 @@ class Agent:
 
         clean_response = raw_response.strip()
 
-        markdown_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', clean_response, re.DOTALL)
+        markdown_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", clean_response, re.DOTALL)
         if markdown_match:
             clean_response = markdown_match.group(1)
 
@@ -278,32 +291,32 @@ class Agent:
         except json.JSONDecodeError:
             pass
 
-        match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+        match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group(0))
             except json.JSONDecodeError:
                 pass
-           
+
         return {
-            "reasoning": "Failed to parse JSON. Remember to output ONLY a single valid JSON object.", 
-            "tool": "error", 
-            "tool_args": {"raw": raw_response}
+            "reasoning": "Failed to parse JSON. Remember to output ONLY a single valid JSON object.",
+            "tool": "error",
+            "tool_args": {"raw": raw_response},
         }
 
     async def run(
         self,
-        user_goal: str,
+        user_goal: Optional[str],
         ui_callback=None,
         auto_approve: bool = False,
         workflow_config: Optional[Dict[str, Any]] = None,
-        history_payload: list = None
+        history_payload: Optional[list] = None,
     ) -> AgentState:
         with tracer.start_as_current_span("agent_execution_loop") as parent_span:
             self.auto_approve = auto_approve
 
             # --- Trigger Async DB Rehydration Before Generating Context ---
-            if getattr(self.memory, 'rehydrate', None):
+            if getattr(self.memory, "rehydrate", None):
                 await self.memory.rehydrate()
 
             def log(msg: str):
@@ -315,11 +328,11 @@ class Agent:
             # Only fall back to UI history_payload if SQLite rehydration yielded no history
             if history_payload and not self.state.history:
                 log("\U0001f504 [System] Restoring session context from UI...")
-                self.state.user_goal = history_payload[0].get("content", "") if history_payload else user_goal
-                
+                self.state.user_goal = history_payload[0].get("content", "") if history_payload else (user_goal or "")
+
                 # Check if this session_id already has rows in SQLite to avoid duplicate inserts
                 existing_max_seq = None
-                if self.uds_server and getattr(self.uds_server, 'message_store', None) and self.state.run_id:
+                if self.uds_server and getattr(self.uds_server, "message_store", None) and self.state.run_id:
                     try:
                         existing_max_seq = await self.uds_server.message_store.max_seq(self.state.run_id)
                     except Exception:
@@ -333,11 +346,15 @@ class Agent:
                     if ui_role == "agent":
                         role_str = "assistant"
                     elif ui_role == "error":
-                        role_str = "tool"  
+                        role_str = "tool"
                     elif ui_role == "user":
                         role_str = "user"
                     try:
-                        msg = Message(role=Role(role_str), content=msg_data.get("content", ""), name=msg_data.get("name", "ui_rehydration"))
+                        msg = Message(
+                            role=Role(role_str),
+                            content=msg_data.get("content", ""),
+                            name=msg_data.get("name", "ui_rehydration"),
+                        )
                         self.state.history.append(msg)
                         if existing_max_seq is None:
                             await self._save_message(msg)
@@ -351,11 +368,11 @@ class Agent:
                 if not is_followup:
                     # Preserve self.state.run_id during session restoration.
                     current_run_id = self.state.run_id
-                    self.state = AgentState(user_goal=user_goal) 
+                    self.state = AgentState(user_goal=user_goal)
                     self.state.run_id = current_run_id or str(uuid.uuid4())
                     self.state.user_goal = user_goal
                     self.state.iterations = 0
-                    self.state.max_iterations = self.max_iterations 
+                    self.state.max_iterations = self.max_iterations
                     self.state.summary = ""
                     self.state.workflow_context = None
 
@@ -404,10 +421,13 @@ class Agent:
 
             with logger.contextualize(run_id=self.state.run_id):
                 budget_exhausted = False
-                tool_descriptions = "\n".join([f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()])
+                tool_descriptions = "\n".join(
+                    [f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()]
+                )
 
                 # --- Load system prompt from external template file ---
                 from services.orchestrator.src.prompts import load_prompt
+
                 _system_tpl = load_prompt("agent_system_v1")
                 system_prompt = _system_tpl.format(
                     tool_descriptions=tool_descriptions,
@@ -426,7 +446,23 @@ class Agent:
                         - FAILURE BEHAVIOR: {ctx.get('failure_behavior', '')}
                         - OUTPUT CONTRACT: {ctx.get('output_contract', '')}
                         """
-                while not self.state.is_complete and not self.state.is_canceled and not budget_exhausted and self.state.iterations < self.state.max_iterations:
+
+                # --- Anti-Loop Circuit Breaker State (Persisted across Resume) ---
+                if user_goal or not hasattr(self, "_call_counts"):
+                    self._call_counts = {}
+                    self._file_read_counts = {}
+                    self._visited_breadcrumbs = []
+
+                call_counts = self._call_counts
+                file_read_counts = self._file_read_counts
+                visited_breadcrumbs = self._visited_breadcrumbs
+
+                while (
+                    not self.state.is_complete
+                    and not self.state.is_canceled
+                    and not budget_exhausted
+                    and self.state.iterations < self.state.max_iterations
+                ):
                     with tracer.start_as_current_span(f"iteration_{self.state.iterations}") as iter_span:
                         log(f"\n[dim]\U0001f504 --- Iteration {self.state.iterations + 1} ---[/dim]")
 
@@ -437,8 +473,8 @@ class Agent:
                             msg = Message(role=Role.USER, content=formatted_input)
                             self.state.history.append(msg)
                             await self._save_message(msg)
-                            log(f"\U0001f4e5 [System] Injected user input into context window.")
-                        
+                            log("\U0001f4e5 [System] Injected user input into context window.")
+
                         # --- 1. Evaluate Reflection (No System Prompt Mutation) ---
                         needs_reflection = False
                         if self.state.iterations > 0 and self.state.iterations % 3 == 0:
@@ -450,23 +486,34 @@ class Agent:
 
                         if self.uds_server and needs_reflection:
                             await self.uds_server.send_notification(
-                                "agent_status", 
-                                {"status": "reflecting", "message": "Critique Required: Evaluating recent actions..."}
+                                "agent_status",
+                                {"status": "reflecting", "message": "Critique Required: Evaluating recent actions..."},
                             )
 
                         # --- 2. Build Base Context (Layer 1 Static + Layer 2 History) ---
-                        # Pass the perfectly static system_prompt to the memory manager
                         context = self.memory.build_safe_context(self.state, system_prompt)
 
                         # --- 3. Append Volatile State (Layer 3 Dynamic) ---
-                        # Inject transient environment variables and reflections as a temporary user block
                         volatile_state = f"[System State]\nAuto-Approve: {self.auto_approve}\n"
-                        
+
+                        if visited_breadcrumbs:
+                            recent_crumbs = "\n".join(visited_breadcrumbs[-12:])
+                            volatile_state += (
+                                f"\n[Pinned Investigation Ledger (Do NOT re-run these reads/searches)]\n"
+                                f"{recent_crumbs}\n"
+                            )
+
                         if needs_reflection:
-                            volatile_state += "\nCRITIQUE REQUIRED: Review your last observations. Did your last action succeed? State your revised approach before calling the next tool."
+                            volatile_state += (
+                                "\nCRITIQUE REQUIRED: Review your last observations and the Pinned Investigation Ledger. "
+                                "Did your last action succeed? State a NEW hypothesis before calling the next tool."
+                            )
 
                         # 🎯 INVERT PROMPT STRUCTURE: Place the JSON contract at the absolute end
-                        volatile_state += "\n\nFINAL DIRECTIVE: Your output MUST be a single valid JSON object with EXACTLY these keys: \"reasoning\" (string), \"tool\" (string), and \"tool_args\" (dictionary)."
+                        volatile_state += (
+                            "\n\nFINAL DIRECTIVE: Your output MUST be a single valid JSON object with EXACTLY these keys: "
+                            '"reasoning" (string), "tool" (string), and "tool_args" (dictionary).'
+                        )
 
                         context.append({"role": "user", "content": volatile_state.strip()})
 
@@ -498,7 +545,9 @@ class Agent:
                             self.state.history.append(msg)
                             await self._save_message(msg)
                             iter_span.set_attribute("governance.budget_exceeded", True)
-                            iter_span.set_attribute("governance.cumulative_token_count", int(self.cumulative_token_count))
+                            iter_span.set_attribute(
+                                "governance.cumulative_token_count", int(self.cumulative_token_count)
+                            )
                             iter_span.set_attribute("governance.token_budget", int(self.token_budget))
                             iter_span.set_status(
                                 trace.Status(
@@ -507,7 +556,6 @@ class Agent:
                                 )
                             )
                             break
-                        # --- end governance guard ---
 
                         if self.state.run_id != my_run_id:
                             log("\U0001f47b [Agent] Aborting orphaned ghost loop (new task started).")
@@ -528,7 +576,7 @@ class Agent:
                         iter_span.set_attribute("agent.reasoning", llm_response.get("reasoning", ""))
 
                         if isinstance(tool_args, str):
-                            log(f"[dim]\u26a0\ufe0f Auto-correcting malformed tool_args string into a dictionary...[/dim]")
+                            log("[dim]\u26a0\ufe0f Auto-correcting malformed tool_args string into a dictionary...[/dim]")
                             if tool_name == "terminal_proxy":
                                 tool_args = {"command": tool_args}
                             elif tool_name == "math_operation":
@@ -538,43 +586,56 @@ class Agent:
 
                         reasoning = llm_response.get("reasoning", "No reasoning provided.")
                         log(f"[bold magenta]\U0001f9e0 [Reasoning][/bold magenta] {reasoning}")
-                        
+
                         if self.uds_server:
-                            # [Compaction Status Relay] Proactively surface a compaction-disabled alert to the UI.
                             try:
-                                if hasattr(self.memory, 'compaction_status'):
+                                if hasattr(self.memory, "compaction_status"):
                                     _comp_status = self.memory.compaction_status()
-                                    if _comp_status and _comp_status.get('disabled') and not getattr(self, '_compaction_alert_sent', False):
+                                    if (
+                                        _comp_status
+                                        and _comp_status.get("disabled")
+                                        and not getattr(self, "_compaction_alert_sent", False)
+                                    ):
                                         self._compaction_alert_sent = True
-                                        logger.warning("[Compaction-Disabled] Relaying alert to UI: %s", _comp_status.get('reason'))
+                                        logger.warning(
+                                            "[Compaction-Disabled] Relaying alert to UI: %s",
+                                            _comp_status.get("reason"),
+                                        )
                                         await self.uds_server.send_notification(
                                             "agent_status",
-                                            {"status": "compaction_disabled", "message": _comp_status.get("reason", "Compaction disabled"),
-                                             "fix_hint": _comp_status.get("fix_hint", ""), "model": _comp_status.get("model", "")}
+                                            {
+                                                "status": "compaction_disabled",
+                                                "message": _comp_status.get("reason", "Compaction disabled"),
+                                                "fix_hint": _comp_status.get("fix_hint", ""),
+                                                "model": _comp_status.get("model", ""),
+                                            },
                                         )
                             except Exception as _comp_alert_exc:
                                 logger.debug("Compaction status relay failed: %s", _comp_alert_exc)
 
                             await self.uds_server.send_notification(
-                                "agent_status", 
-                                {"status": "thinking", "message": reasoning}
+                                "agent_status", {"status": "thinking", "message": reasoning}
                             )
 
                         log(f"[bold yellow]\U0001f527 [Dispatching][/bold yellow] {tool_name} with args: {tool_args}")
 
                         # 5.4 RAG Context Relevance Tracking
-                        if tool_name in ["apply_inline_diff", "file_system"] and isinstance(tool_args, dict) and "file_path" in tool_args:
+                        if (
+                            tool_name in ["apply_inline_diff", "file_system"]
+                            and isinstance(tool_args, dict)
+                            and "file_path" in tool_args
+                        ):
                             iter_span.set_attribute("rag.context_utilized_file", tool_args.get("file_path"))
 
                         if tool_name == "finish_task":
                             self.state.is_complete = True
                             summary = tool_args.get("summary", "Task completed successfully.")
                             log(f"[bold green]\u2705 [Task Complete][/bold green] {summary}")
-                            self.state.summary = summary 
+                            self.state.summary = summary
                             msg = Message(role=Role.TOOL, content=summary, name=tool_name)
                             self.state.history.append(msg)
                             await self._save_message(msg)
-                            
+
                             success_flag = tool_args.get("success", True)
                             iter_span.set_attribute("task.success", success_flag)
                             if not success_flag:
@@ -582,61 +643,121 @@ class Agent:
                             break
 
                         dispatcher_tools = ["file_system", "terminal_proxy", "python_repl", "apply_inline_diff"]
-                        
-                        if tool_name not in self.tool_registry.tools and tool_name != "finish_task":
-                            observation = f"Error: Tool '{tool_name}' is disabled or not recognized in this workflow."
-                        elif tool_name in dispatcher_tools:
-                            observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=self.auto_approve)
+
+                        # --- Guardrail 1: Block forbidden shell file-reads/greps ---
+                        shell_block_msg = self._is_forbidden_shell_search(tool_name, tool_args)
+
+                        # --- Guardrail 2: Duplicate Tool-Call & File-Inspection Circuit Breaker ---
+                        exact_sig, target_file = self._normalize_tool_signature(tool_name, tool_args)
+
+                        if shell_block_msg:
+                            observation = shell_block_msg
+                            iter_span.set_attribute("harness.guardrail_triggered", "forbidden_shell_search")
                         else:
-                            if tool_name == "web_search":
-                                tool_args["run_id"] = self.state.run_id
-                                tool_args["search_config"] = self.search_config
-                                tool_args["max_chars"] = getattr(self.dispatcher, "max_file_read_chars", 4000)
-                            observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)      
+                            call_counts[exact_sig] = call_counts.get(exact_sig, 0) + 1
+                            if target_file:
+                                file_read_counts[target_file] = file_read_counts.get(target_file, 0) + 1
+
+                            if target_file and file_read_counts[target_file] > 2:
+                                observation = (
+                                    f"Error [Circuit Breaker]: You have already read or searched `{target_file}` "
+                                    f"{file_read_counts[target_file] - 1} times in this session. Re-reading the same file "
+                                    f"is blocked to prevent an infinite loop. Inspect a different file in the call chain "
+                                    f"or apply your fix."
+                                )
+                                iter_span.set_attribute("harness.guardrail_triggered", "duplicate_file_inspection")
+                            elif not target_file and call_counts[exact_sig] >= 2:
+                                observation = (
+                                    f"Error [Circuit Breaker]: You have already executed `{tool_name}` with these exact "
+                                    f"arguments ({call_counts[exact_sig]} times). Do NOT repeat identical tool calls. "
+                                    f"Formulate a new hypothesis or inspect a different component."
+                                )
+                                iter_span.set_attribute("harness.guardrail_triggered", "duplicate_exact_call")
+                            elif tool_name not in self.tool_registry.tools and tool_name != "finish_task":
+                                observation = f"Error: Tool '{tool_name}' is disabled or not recognized in this workflow."
+                            elif tool_name in dispatcher_tools:
+                                observation = await self.dispatcher.execute_async(
+                                    tool_name, tool_args, auto_approve=self.auto_approve
+                                )
+                                if target_file and file_read_counts[target_file] == 2:
+                                    observation = (
+                                        f"⚠️ [Harness Notice: This is your 2nd time reading `{target_file}`. "
+                                        f"Further reads of this file will be blocked by the circuit breaker.]\n"
+                                        f"{observation}"
+                                    )
+                                if target_file:
+                                    visited_breadcrumbs.append(
+                                        f"- Iter {self.state.iterations + 1}: Inspected `{target_file}` via `{tool_name}` (Read #{file_read_counts[target_file]})"
+                                    )
+                            else:
+                                if tool_name == "web_search":
+                                    tool_args["run_id"] = self.state.run_id
+                                    tool_args["search_config"] = self.search_config
+                                    tool_args["max_chars"] = getattr(self.dispatcher, "max_file_read_chars", 4000)
+                                observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
+                                if tool_name == "search_codebase":
+                                    q_str = tool_args.get("query", "")
+                                    p_pref = tool_args.get("path_prefix") or tool_args.get("path")
+                                    scope_str = f" (in `{p_pref}`)" if p_pref else ""
+                                    visited_breadcrumbs.append(
+                                        f"- Iter {self.state.iterations + 1}: Searched codebase for `{q_str}`{scope_str}"
+                                    )
 
                         log(f"[bold blue]\U0001f440 [Observation][/bold blue]\n{observation}")
 
                         obs_str = str(observation).lower()
-                        is_violation = (
-                            obs_str.startswith("error: command blocked by sandbox") or
-                            obs_str.startswith("security violation:")
+                        is_violation = obs_str.startswith("error: command blocked by sandbox") or obs_str.startswith(
+                            "security violation:"
                         )
-                        
+
                         if is_violation:
                             log("\u26a0\ufe0f [System] Sandbox violation detected. Requesting override from user...")
-                            
+
                             bypass_approved = False
                             if self.uds_server:
                                 bypass_res = await self.uds_server.request_client_context(
                                     "request_sandbox_bypass",
-                                    {"tool_name": tool_name, "observation": observation}
+                                    {"tool_name": tool_name, "observation": observation},
                                 )
                                 bypass_approved = bypass_res.get("approved", False)
-                                
+
                             if bypass_approved:
                                 log("\u2705 User approved sandbox bypass. Retrying action...")
                                 old_strict = self.dispatcher.sandbox_config.get("strict_mode", True)
                                 self.dispatcher.sandbox_config["strict_mode"] = False
                                 try:
                                     if tool_name in dispatcher_tools:
-                                        observation = await self.dispatcher.execute_async(tool_name, tool_args, auto_approve=auto_approve)
+                                        try:
+                                            observation = await self.dispatcher.execute_async(
+                                                tool_name, tool_args, auto_approve=True, bypass_sandbox=True
+                                            )
+                                        except TypeError:
+                                            observation = await self.dispatcher.execute_async(
+                                                tool_name, tool_args, auto_approve=True
+                                            )
                                     else:
                                         observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
                                 finally:
                                     self.dispatcher.sandbox_config["strict_mode"] = old_strict
                                 is_violation = False
+                                log(f"[bold blue]\U0001f440 [Observation (Retry)][/bold blue]\n{observation}")
                             else:
                                 log("\U0001f6d1 [System] Sandbox bypass denied. Forcing agent termination.")
                                 self.state.is_complete = True
-                                clean_error_msg = "Task aborted by system sandbox constraints. The requested action was blocked for security reasons."
+                                clean_error_msg = (
+                                    "Task aborted by system sandbox constraints. "
+                                    "The requested action was blocked for security reasons."
+                                )
                                 self.state.summary = clean_error_msg
                                 msg = Message(role=Role.TOOL, content=self.state.summary, name="finish_task")
                                 self.state.history.append(msg)
                                 await self._save_message(msg)
-                                
+
                                 iter_span.set_attribute("error", True)
                                 iter_span.set_attribute("error.message", "Sandbox constraint violation")
-                                iter_span.set_status(trace.Status(trace.StatusCode.ERROR, "Sandbox constraint violation"))
+                                iter_span.set_status(
+                                    trace.Status(trace.StatusCode.ERROR, "Sandbox constraint violation")
+                                )
                                 break
 
                         if tool_name == "error":
@@ -645,9 +766,15 @@ class Agent:
                                 log("\U0001f6d1 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
                                 break
                             elif "Failed to parse JSON" in reasoning_text:
-                                log("\U0001f6d1 [Circuit Breaker] LLM produced invalid JSON (likely context overflow). Aborting loop to prevent runaway errors.")
+                                log(
+                                    "\U0001f6d1 [Circuit Breaker] LLM produced invalid JSON (likely context overflow). "
+                                    "Aborting loop to prevent runaway errors."
+                                )
                                 self.state.is_complete = True
-                                self.state.summary = "Task aborted: The local engine failed to produce valid JSON, likely due to context window exhaustion."
+                                self.state.summary = (
+                                    "Task aborted: The local engine failed to produce valid JSON, "
+                                    "likely due to context window exhaustion."
+                                )
                                 break
 
                         # --- Pre-Compaction Heuristic Noise Tagging ---
@@ -669,13 +796,17 @@ class Agent:
                                 "no such file",
                                 "not found: file",
                                 "no such directory",
+                                "error [circuit breaker]",
+                                "disabled by the harness",
                             )
                         )
                         msg = Message(role=Role.TOOL, content=str(observation), name=tool_name, is_noise=is_noise)
                         self.state.history.append(msg)
                         await self._save_message(msg)
                         if is_noise:
-                            logger.debug(f"[Noise-Tag] Observation from '{tool_name}' flagged as noise for pre-compaction filtering.")
+                            logger.debug(
+                                f"[Noise-Tag] Observation from '{tool_name}' flagged as noise for pre-compaction filtering."
+                            )
                         self.state.iterations += 1
 
             if not self.state.is_complete and not self.state.is_canceled:
@@ -692,7 +823,9 @@ class Agent:
                     parent_span.set_attribute("governance.termination_reason", "max_iterations_reached")
                     parent_span.set_attribute("governance.max_iterations", int(self.state.max_iterations))
                     parent_span.set_attribute("governance.iterations_executed", int(self.state.iterations))
-                    parent_span.set_attribute("governance.cumulative_token_count_at_termination", int(self.cumulative_token_count))
+                    parent_span.set_attribute(
+                        "governance.cumulative_token_count_at_termination", int(self.cumulative_token_count)
+                    )
 
                 self.state.summary = (
                     f"\u26a0\ufe0f Agent loop terminated: max_iterations limit "
@@ -703,10 +836,7 @@ class Agent:
             elif self.state.is_canceled:
                 if parent_span.is_recording():
                     parent_span.set_status(
-                        trace.Status(
-                            trace.StatusCode.ERROR,
-                            "Agent loop was manually cancelled by the user."
-                        )
+                        trace.Status(trace.StatusCode.ERROR, "Agent loop was manually cancelled by the user.")
                     )
                     parent_span.set_attribute("governance.termination_reason", "user_cancelled")
                 log("\n\U0001f6d1 --- Agent Loop Cancelled ---")

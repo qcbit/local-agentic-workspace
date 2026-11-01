@@ -124,10 +124,15 @@ class ToolRegistry:
             },
             "search_codebase": {
                 "name": "search_codebase",
-                "description": "Searches the local codebase using semantic vector embeddings. Use this when you need to find where a function, class, or variable is defined, or to understand how a specific part of the local project works.",
+                "description": (
+                    "Searches the workspace codebase using hybrid semantic and lexical search. "
+                    "Args: {'query': 'search terms or identifier', 'path_prefix': 'optional subdirectory filter e.g. apps/vscode-extension', 'limit': 5}. "
+                    "ALWAYS prefer this tool over shell grep/find."
+                ),
+                "handler": self._search_codebase_async,
                 "parameters": {
                     "type": "object",
-                    "properties": {"query": {"type": "string", "description": "The semantic search query"}},
+                    "properties": {"query": {"type": "string", "description": "The semantic search query"}, "path_prefix": {"type": "string", "description": "The path prefix to filter results"}},
                     "required": ["query"],
                 },
             },
@@ -307,3 +312,44 @@ class ToolRegistry:
 
         except Exception as e:
             return f"Error executing {tool_name}: {str(e)}"
+
+    async def _search_codebase_async(self, args: Dict[str, Any]) -> str:
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return "Error: 'query' argument is required for search_codebase."
+
+        limit = int(args.get("limit", 5))
+        # Support 'path_prefix' along with common alias hallucinations ('path', 'directory')
+        path_prefix = (
+            args.get("path_prefix")
+            or args.get("path")
+            or args.get("directory")
+            or None
+        )
+        if isinstance(path_prefix, str):
+            path_prefix = path_prefix.strip() or None
+
+        if not self.uds_server or not getattr(self.uds_server, "vector_store", None):
+            return "Error: Vector store is not initialized."
+
+        try:
+            results = await asyncio.to_thread(
+                self.uds_server.vector_store.semantic_search,
+                query=query,
+                limit=limit,
+                path_prefix=path_prefix,
+            )
+        except Exception as e:
+            return f"Error executing codebase search: {e}"
+
+        if not results:
+            scope_note = f" within '{path_prefix}'" if path_prefix else ""
+            return f"No codebase search results found for query '{query}'{scope_note}."
+
+        formatted = ["Codebase Search Results:\n"]
+        for i, res in enumerate(results, start=1):
+            file_path = res.get("file_path", "unknown")
+            content = res.get("content", "")
+            formatted.append(f"--- Result {i} (File: {file_path}) ---\n{content}\n")
+
+        return "\n".join(formatted)

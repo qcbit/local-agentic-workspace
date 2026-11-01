@@ -833,12 +833,15 @@ class JsonRpcUdsServer:
         import time
         query = params.get("query", "")
         limit = params.get("limit", 5)
+        path_prefix = params.get("path_prefix", None)
         if not query:
             raise ValueError("Query string is required for search.")
 
         # Time the operation to verify sub-100ms latency
         start_time = time.time()
-        raw_results = self.vector_store.semantic_search(query, limit=limit)
+        raw_results = self.vector_store.semantic_search(
+            query, limit=limit, path_prefix=path_prefix
+        )
         
         # Strip the massive float vectors out before sending over IPC
         clean_results = []
