@@ -107,6 +107,8 @@ class Agent:
 
         # Extract the store from the uds_server instance
         message_store = uds_server.message_store if uds_server else None
+        semantic_graph = uds_server.semantic_graph if uds_server else None
+        vector_store = uds_server.vector_store if uds_server else None
 
         self.memory = SlidingContextManager(
             memory_config=memory_config,
@@ -117,6 +119,9 @@ class Agent:
             max_tokens=memory_config.get("max_tokens", 6000),
             summary_budget=4096,
             message_store=message_store,
+            semantic_graph=semantic_graph,
+            vector_store=vector_store,
+            workspace_root=self.workspace_root,
         )
 
         # ------------------------------------------------------------------
@@ -418,6 +423,7 @@ class Agent:
             parent_span.set_attribute("agent.user_goal", user_goal or "Resumed")
 
             my_run_id = self.state.run_id
+            task_success = False
 
             with logger.contextualize(run_id=self.state.run_id):
                 budget_exhausted = False
@@ -630,7 +636,7 @@ class Agent:
                         if tool_name == "finish_task":
                             self.state.is_complete = True
                             summary = tool_args.get("summary", "Task completed successfully.")
-                            log(f"[bold green]\u2705 [Task Complete][/bold green] {summary}")
+                            log(f"[bold green]✅ [Task Complete][/bold green] {summary}")
                             self.state.summary = summary
                             msg = Message(role=Role.TOOL, content=summary, name=tool_name)
                             self.state.history.append(msg)
@@ -638,8 +644,10 @@ class Agent:
 
                             success_flag = tool_args.get("success", True)
                             iter_span.set_attribute("task.success", success_flag)
+                            task_success = success_flag # <-- Mark success for the global hook
                             if not success_flag:
                                 iter_span.set_status(trace.Status(trace.StatusCode.ERROR, "Task reported failure"))
+                            
                             break
 
                         dispatcher_tools = ["file_system", "terminal_proxy", "python_repl", "apply_inline_diff"]
@@ -835,16 +843,71 @@ class Agent:
 
             elif self.state.is_canceled:
                 if parent_span.is_recording():
-                    parent_span.set_status(
-                        trace.Status(trace.StatusCode.ERROR, "Agent loop was manually cancelled by the user.")
-                    )
+                    parent_span.set_status(trace.Status(trace.StatusCode.ERROR, "Agent loop was manually cancelled by the user."))
                     parent_span.set_attribute("governance.termination_reason", "user_cancelled")
-                log("\n\U0001f6d1 --- Agent Loop Cancelled ---")
+                log("\n🛑 --- Agent Loop Cancelled ---")
 
             else:
+                # Rely on task_success to accurately flag the root span in Phoenix
                 if parent_span.is_recording():
-                    parent_span.set_status(trace.Status(trace.StatusCode.OK))
-                log("\n\U0001f3c1 --- Agent Loop Completed ---")
+                    if task_success:
+                        parent_span.set_status(trace.Status(trace.StatusCode.OK))
+                    else:
+                        parent_span.set_status(trace.Status(trace.StatusCode.ERROR, str(self.state.summary)))
+                        parent_span.set_attribute("error", True)
+                        parent_span.set_attribute("error.message", str(self.state.summary))
+                log("\n🏁 --- Agent Loop Completed ---")
+
+            # ------------------------------------------------------------------
+            # POST-RUN MEMORY CONSOLIDATION (Write Path)
+            # ------------------------------------------------------------------
+            if self.uds_server and not self.state.is_canceled:
+                # 1. Compress the trajectory for vector storage
+                trajectory_log = []
+                for m in self.state.history:
+                    role = m.role.value if hasattr(m.role, 'value') else str(m.role)
+                    if role == "assistant":
+                        try:
+                            parsed = json.loads(m.content)
+                            if parsed.get("tool"):
+                                trajectory_log.append({"tool": parsed["tool"], "args": parsed.get("tool_args")})
+                        except Exception:
+                            pass
+                    elif role == "tool" and getattr(m, 'name', None):
+                        content_str = str(m.content)
+                        trajectory_log.append({"observation": content_str[:150] + "..." if len(content_str) > 150 else content_str})
+
+                if not task_success:
+                    trajectory_log.append({
+                        "tool": "SYSTEM_ABORT", 
+                        "args": {"reason": self.state.summary}
+                    })
+
+                # 2. Semantic Extraction (ONLY on success to prevent learning bad habits)
+                if task_success and getattr(self.uds_server, 'semantic_graph', None):
+                    trajectory_text = "\n".join([f"{m.role.value if hasattr(m.role, 'value') else str(m.role)}: {m.content}" for m in self.state.history[-15:]])
+                    asyncio.create_task(
+                        self.uds_server.semantic_graph.extract_and_store(
+                            trajectory_text=trajectory_text,
+                            workspace_scope=self.workspace_root,
+                            llm_provider=self.memory.llm_provider
+                        )
+                    )
+
+                # 3. Episodic Write (Record BOTH successes and failures for few-shot learning)
+                if getattr(self.uds_server, 'vector_store', None):
+                    episode_id = self.state.run_id or str(uuid.uuid4())
+                    outcome_str = "success" if task_success else "failure"
+                    asyncio.create_task(
+                        asyncio.to_thread(
+                            self.uds_server.vector_store.upsert_episode,
+                            episode_id=episode_id,
+                            workspace_scope=self.workspace_root,
+                            task_summary=f"Goal: {self.state.user_goal} | Result: {self.state.summary}",
+                            trajectory=trajectory_log,
+                            outcome=outcome_str
+                        )
+                    )
 
             return self.state
 

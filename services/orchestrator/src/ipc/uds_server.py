@@ -75,6 +75,7 @@ from services.orchestrator.src.llm.provider import UniversalLLMProvider
 from services.orchestrator.src.llm.tracing import setup_phoenix_tracing
 from services.orchestrator.src.logging.log_filter import scrub_secrets_from_string, SecretRedactingFilter
 from services.orchestrator.src.memory.persistence import MessageStore
+from services.orchestrator.src.memory.semantic_graph import SemanticGraphStore
 
 from opentelemetry import trace
 tracer = trace.get_tracer(__name__)
@@ -249,6 +250,8 @@ class JsonRpcUdsServer:
         logger.info("Initializing SQLite Message Store...")
         db_path = Path(workspace_root) / ".agentic_workspace" / "db" / "orchestrator.db"
         self.message_store = MessageStore(db_path=db_path)
+        logger.info("Initializing KùzuDB Semantic Graph...")
+        self.semantic_graph = SemanticGraphStore(workspace_root=workspace_root)
         self.pending_requests = {}
         self.active_writer = None
         self.persistent_agent = None
