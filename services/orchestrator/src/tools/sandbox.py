@@ -4,6 +4,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+from typing import Tuple
 
 
 def get_python_interpreter() -> str:
@@ -75,7 +76,7 @@ def execute_python_repl(code: str, timeout: int = 5) -> str:
         return f"Error executing python code: {str(e)}"
 
 
-def validate_terminal_command(workspace_root: str, command_str: str) -> tuple[bool, str]:
+def validate_terminal_command(workspace_root: str, command_str: str) -> Tuple[bool, str]:
     """Scans a shell command for path arguments escaping workspace bounds."""
     try:
         tokens = shlex.split(command_str)

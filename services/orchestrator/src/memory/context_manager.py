@@ -19,7 +19,7 @@ import asyncio
 from dataclasses import dataclass
 import os
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import logging
 from opentelemetry import trace
@@ -546,7 +546,7 @@ class SlidingContextManager:
 
     def _classify_for_pruning(
         self, messages: List[Any]
-    ) -> tuple[List[Any], List[PruneCandidate]]:
+    ) -> Tuple[List[Any], List[PruneCandidate]]:
         """Split overflow into (surviving, pruned) using deterministic heuristics.
 
         BREADCRUMB TRADE-OFF:

@@ -39,7 +39,7 @@ class ToolDispatcher:
         ]
 
     async def execute_async(
-        self, tool_name: str, arguments: Dict[str, Any], auto_approve: bool = False
+        self, tool_name: str, arguments: Dict[str, Any], auto_approve: bool = False, bypass_sandbox: bool = False
     ) -> str:
         logger.info(
             f"🔧 [Tool Call] Dispatching '{tool_name}' with args: {arguments} (Auto-Approve: {auto_approve})"
@@ -49,7 +49,7 @@ class ToolDispatcher:
             if tool_name == "file_system":
                 return await self._handle_file_system_async(arguments, auto_approve=auto_approve)
             elif tool_name == "terminal_proxy":
-                return await self._handle_terminal_proxy_async(arguments, auto_approve=auto_approve)
+                return await self._handle_terminal_proxy_async(arguments, auto_approve=auto_approve, bypass_sandbox=bypass_sandbox)
             elif tool_name == "python_repl":
                 return execute_python_repl(arguments.get("code", ""))
             elif tool_name == "validate_python_syntax":
@@ -155,20 +155,25 @@ class ToolDispatcher:
 
         return f"Error: Unsupported file system action '{action}'."
 
-    async def _handle_terminal_proxy_async(self, args: Dict[str, Any], auto_approve: bool = False) -> str:
+    async def _handle_terminal_proxy_async(
+        self, args: Dict[str, Any], auto_approve: bool = False, bypass_sandbox: bool = False
+    ) -> str:
         command = args.get("command")
         if not command:
             return "Error: No command provided."
 
-        is_safe, error_msg = validate_terminal_command(self.workspace_root, command)
-        if not is_safe:
-            logger.warning(f"🔒 [Sandbox Blocked] Command: '{command}'")
-            return error_msg
+        if not bypass_sandbox:
+            is_safe, error_msg = validate_terminal_command(self.workspace_root, command)
+            if not is_safe:
+                logger.warning(f"🔒 [Sandbox Blocked] Command: '{command}'")
+                return error_msg
+        else:
+            logger.info(f"🔓 [Sandbox Bypass Active] Skipping static validation for: '{command}'")
 
         command_lower = command.lower()
         if any(forbidden in command_lower.split() for forbidden in self.shell_deny_list):
             return f"SECURITY VIOLATION: Command execution blocked. '{command}' contains forbidden keywords."
-
+        
         if auto_approve:
             logger.info(f"⚡ [Auto-Approve] Silently executing '{command}'...")
             audit_logger.info(f"AUDIT LOG: Auto-approved terminal command: '{command}'")
