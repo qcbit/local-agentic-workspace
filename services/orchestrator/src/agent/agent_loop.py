@@ -696,8 +696,11 @@ class Agent:
                                     tool_args["max_chars"] = getattr(self.dispatcher, "max_file_read_chars", 4000)
                                 observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
                                 if tool_name == "search_codebase":
+                                    q_str = tool_args.get("query", "")
+                                    p_pref = tool_args.get("path_prefix") or tool_args.get("path")
+                                    scope_str = f" (in `{p_pref}`)" if p_pref else ""
                                     visited_breadcrumbs.append(
-                                        f"- Iter {self.state.iterations + 1}: Searched codebase for `{tool_args.get('query', '')}`"
+                                        f"- Iter {self.state.iterations + 1}: Searched codebase for `{q_str}`{scope_str}"
                                     )
 
                         log(f"[bold blue]\U0001f440 [Observation][/bold blue]\n{observation}")
