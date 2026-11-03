@@ -30,6 +30,8 @@ from services.orchestrator.src.memory.persistence import (
     serialize_message, 
     deserialize_message
 )
+from services.orchestrator.src.memory.semantic_graph import SemanticGraphStore
+from services.orchestrator.src.rag.vector_store import LocalVectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,10 @@ class SlidingContextManager:
         llm_config: Optional[Dict[str, Any]] = None,
         max_tokens: int = 32768, 
         summary_budget: int = 4096,
-        message_store: Optional[MessageStore] = None
+        message_store: Optional[MessageStore] = None,
+        semantic_graph: Optional[SemanticGraphStore] = None,
+        vector_store: Optional[LocalVectorStore] = None,
+        workspace_root: Optional[str] = None,
     ) -> None:
         self.max_tokens = memory_config.get("max_tokens", 4000)
         self.llm_provider = llm_provider
@@ -99,7 +104,9 @@ class SlidingContextManager:
 
         # Feature gate: Only attach store if ORCH_PERSIST=1
         self._store = message_store if os.environ.get("ORCH_PERSIST") == "1" else None
-        
+        self._semantic_graph = semantic_graph
+        self._vector_store = vector_store
+        self.workspace_root = workspace_root
         # Ensure we have a session key if persistence is active
         if self._store and not self.state.run_id:
             logger.warning("ORCH_PERSIST=1 but no run_id found in AgentState. Persistence disabled.")
@@ -124,7 +131,7 @@ class SlidingContextManager:
         self._compaction_missing_warned: bool = False
 
         logger.info(
-            f"\U0001f9e0 Context Manager initialized for '{self.model_name}' "
+            f"🧠 Context Manager initialized for '{self.model_name}' "
             f"(Ratio: {self.chars_per_token} chars/token, Max: {self.max_tokens}, "
             f"Chunk: {self.compaction_chunk_size})"
         )
@@ -376,6 +383,51 @@ class SlidingContextManager:
         4. While the task is in flight, inject the raw overflow as a non-
            blocking fallback so the flagship never stalls.
         """
+        # --- NEW: Semantic Memory Read Path ---
+        semantic_rules = ""
+        if self._semantic_graph:
+            try:
+                pref_results = self._semantic_graph.conn.execute(
+                    "MATCH (u:User {id: 'default_user'})-[r:PREFERS]->(t:Tool) "
+                    "WHERE r.valid_until IS NULL "
+                    "RETURN t.name ORDER BY r.weight DESC"
+                )
+                
+                prefs = [row[0] for row in pref_results if row]
+                if prefs:
+                    semantic_rules += f"\\n\\n[USER PREFERENCES]\\nPreferred tooling conventions: {', '.join(prefs)}"
+            except Exception as e:
+                logger.warning(f"Failed to retrieve semantic graph facts: {e}")
+
+        episodic_rules = ""
+        if getattr(self, '_vector_store', None) and self.state.user_goal:
+            try:
+                episodes = self._vector_store.search_episodes(self.state.user_goal, self.workspace_root, limit=3)
+                if episodes:
+                    successes = [e for e in episodes if e.get("outcome") == "success"]
+                    failures = [e for e in episodes if e.get("outcome") == "failure"]
+                    
+                    if successes:
+                        episodic_rules += "\\n\\n[VERIFIED PATTERNS: Successful past trajectories for similar tasks]\\n"
+                        for ep in successes:
+                            traj = json.loads(ep.get("trajectory", "[]"))
+                            # Flatten trajectory into a compact action chain (e.g., search_codebase -> file_system -> terminal_proxy)
+                            chain = " -> ".join([t.get("tool", "action") for t in traj if "tool" in t])
+                            episodic_rules += f"- Goal: {ep['task_summary']}\\n  Successful Tool Chain: {chain}\\n"
+                            
+                    if failures:
+                        episodic_rules += "\\n\\n[KNOWN PITFALLS: Past failures to avoid]\\n"
+                        for ep in failures:
+                            traj = json.loads(ep.get("trajectory", "[]"))
+                            chain = " -> ".join([t.get("tool", "action") for t in traj if "tool" in t])
+                            episodic_rules += f"- Goal: {ep['task_summary']}\\n  Failed Tool Chain: {chain} (Do not repeat this exact sequence)\\n"
+                            
+            except Exception as e:
+                logger.warning(f"Failed to retrieve episodic vector context: {e}")
+
+        # Merge semantic facts and episodic trajectories into the final system prompt
+        enriched_system_prompt = system_prompt + semantic_rules + episodic_rules
+
         # 1. Differential Reintegration (id-based prune, immune to __eq__)
         if self._pending_task is not None and self._pending_task.done():
             try:
@@ -398,9 +450,9 @@ class SlidingContextManager:
                 self._pending_task = None
                 self._pending_snapshot = None
 
-        # 2. Pin the Core Prompts
+        # 2. Pin the Core Prompts (Utilizing the Enriched Prompt)
         core_context = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": enriched_system_prompt},
             {"role": "user", "content": state.user_goal},
         ]
         core_tokens = sum(self._estimate_tokens(msg["content"]) for msg in core_context)
@@ -454,7 +506,6 @@ class SlidingContextManager:
         # 5. Trigger Async Compaction (only if no task already in flight)
         if overflow_messages and self._pending_task is None:
             
-            # --- NEW: Prune redundant retries before serialization ---
             surviving_overflow, pruned = self._classify_for_pruning(overflow_messages)
             
             if pruned:
@@ -467,7 +518,6 @@ class SlidingContextManager:
                     span.set_attribute("compaction.pruned_messages", len(pruned))
                     span.set_attribute("compaction.pruned_chars", total_chars)
             
-            # If everything was somehow pruned, skip compaction
             if not surviving_overflow:
                 return core_context + summary_context + retained_history
 
@@ -491,7 +541,6 @@ class SlidingContextManager:
 
             if not surviving_overflow:
                 return core_context + summary_context + retained_history
-            # ---------------------------------------------------------
 
             if len(surviving_overflow) >= self.compaction_chunk_size:
                 logger.info(
@@ -499,7 +548,6 @@ class SlidingContextManager:
                     f"{self.compaction_chunk_size}). Dispatching async background task..."
                 )
 
-                # Use surviving_overflow for all downstream operations
                 snapshot_ids = frozenset(id(m) for m in surviving_overflow)
                 dropped_text = "\n".join(
                     f"{m.role.value if hasattr(m.role, 'value') else str(m.role)}: {m.content}"
@@ -524,10 +572,8 @@ class SlidingContextManager:
 
         # 6. Non-Blocking Fallback or Normal Return
         if self._pending_task is not None and overflow_messages:
-            # Fallback path: Inject the raw overflow so the flagship never stalls.
-            # CRITICAL: We only inject the surviving messages, excluding the pruned ones.
             raw_fallback: List[Dict[str, str]] = []
-            for m in surviving_overflow: # <-- Note the change to surviving_overflow
+            for m in surviving_overflow: 
                 role_str = m.role.value if hasattr(m.role, "value") else str(m.role)
                 content = m.content
                 if role_str == "tool":
@@ -575,7 +621,6 @@ class SlidingContextManager:
             for j in range(i + 1, len(messages)):
                 a, b = messages[i], messages[j]
                 
-                # Check for Role.TOOL dynamically based on your object structure
                 a_role = a.role.value if hasattr(a.role, "value") else str(a.role)
                 b_role = b.role.value if hasattr(b.role, "value") else str(b.role)
                 
@@ -586,7 +631,7 @@ class SlidingContextManager:
                     and a.content == b.content
                 ):
                     superseded_ids.add(id(a))
-                    break  # Found a later duplicate, move to next 'a'
+                    break
 
         for msg in messages:
             msg_id = id(msg)

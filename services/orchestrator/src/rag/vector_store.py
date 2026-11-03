@@ -1,6 +1,8 @@
 import os
 import re
 import time
+import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -84,6 +86,18 @@ DEFAULT_EXCLUDED_EXTENSIONS: Set[str] = {
     ".vsix",
 }
 
+logger = logging.getLogger(__name__)
+
+# Define the schema for episodic memory
+episodic_schema = pa.schema([
+    pa.field("episode_id", pa.string()),
+    pa.field("timestamp", pa.int64()),
+    pa.field("workspace_scope", pa.string()),
+    pa.field("task_summary", pa.string()),     # The text that gets embedded
+    pa.field("embedding", pa.list_(pa.float32(), 384)), # Adjust dimension if using a different embedding model
+    pa.field("trajectory", pa.string()),       # Compressed JSON log of actions
+    pa.field("outcome", pa.string())           # "success" or "failure"
+])
 
 class LocalVectorStore:
     def __init__(self, workspace_root: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
@@ -127,6 +141,11 @@ class LocalVectorStore:
         # 3. Initialize the Tree-sitter AST Chunker
         logger.info("Initializing Semantic Chunker...")
         self.chunker = SemanticChunker()
+
+        if "episodes" not in self.db.table_names():
+            self.db.create_table("episodes", schema=episodic_schema)
+            logger.info("Created episodic memory table in LanceDB.")
+        self.episode_table = self.db.open_table("episodes")
 
     @staticmethod
     def _escape_sql_string(val: str) -> str:
@@ -263,6 +282,105 @@ class LocalVectorStore:
                 logger.info(f"✅ Indexed {len(data_to_insert)} {chunk_type} chunks for {file_path}")
             except Exception as e:
                 logger.error(f"Failed to insert into LanceDB: {e}")
+
+    def upsert_episode(self, episode_id: str, workspace_scope: str, task_summary: str, trajectory: list, outcome: str):
+        """Embeds a completed task and stores the trajectory for few-shot recall."""
+        with tracer.start_as_current_span("episodic_memory_write") as span:
+            span.set_attribute("episode.id", episode_id)
+            span.set_attribute("episode.outcome", outcome)
+            span.set_attribute("episode.trajectory_length", len(trajectory))
+            
+            try:
+                t0 = time.time()
+                embedding = list(self.embedder.embed([task_summary]))[0]
+                span.set_attribute("latency.embedding_ms", (time.time() - t0) * 1000)
+                
+                data = [{
+                    "episode_id": episode_id,
+                    "timestamp": int(time.time()),
+                    "workspace_scope": workspace_scope,
+                    "task_summary": task_summary,
+                    "embedding": embedding,
+                    "trajectory": json.dumps(trajectory),
+                    "outcome": outcome
+                }]
+                
+                t1 = time.time()
+                self.episode_table.add(data)
+                span.set_attribute("latency.lancedb_write_ms", (time.time() - t1) * 1000)
+                logger.info(f"💾 Saved episode {episode_id} ({outcome}) to LanceDB.")
+                
+            except Exception as e:
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+                logger.error(f"Failed to upsert episode to LanceDB: {e}")
+
+    def search_episodes(self, query: str, workspace_scope: str, limit: int = 3) -> list:
+        """Embeds the current goal and retrieves past episodes with time-decay hybrid scoring."""
+        import math
+        
+        if "episodes" not in self.db.table_names():
+            return []
+            
+        with tracer.start_as_current_span("episodic_memory_read") as span:
+            span.set_attribute("search.query", query)
+            span.set_attribute("search.limit", limit)
+            
+            try:
+                t0 = time.time()
+                query_embedding = list(self.embedder.embed([query]))[0]
+                span.set_attribute("latency.embedding_ms", (time.time() - t0) * 1000)
+                
+                t1 = time.time()
+                # 1. Fetch a broader candidate pool to allow time-decay re-ranking
+                candidate_limit = limit * 5
+                results = self.episode_table.search(query_embedding).metric("cosine").limit(candidate_limit).to_list()
+                
+                # 2. Filter by workspace scope and apply a realistic cosine distance threshold (e.g., < 1.5)
+                # Cosine distance ranges from 0.0 (identical) to 2.0 (opposite). 1.5 allows for moderate semantic drift.
+                filtered_results = [
+                    r for r in results 
+                    if r.get("workspace_scope") == workspace_scope and float(r.get("_distance", 2.0)) < 1.5
+                ]
+                
+                # 3. Apply Time-Decay Scoring
+                current_time = time.time()
+                for r in filtered_results:
+                    # Convert distance to similarity (0.0 to 1.0)
+                    # For cosine distance (0 to 2), similarity is roughly 1.0 - (distance / 2.0)
+                    dist = float(r.get("_distance", 2.0))
+                    similarity = max(0.0, 1.0 - (dist / 2.0))
+                    
+                    # Calculate age in days
+                    age_seconds = current_time - float(r.get("timestamp", current_time))
+                    age_days = max(0.0, age_seconds / 86400.0)
+                    
+                    # Exponential decay (14-day half-life scaling)
+                    time_bonus = math.exp(-age_days / 14.0)
+                    
+                    # Composite score: 70% Semantic Relevance, 30% Recency
+                    r["_hybrid_score"] = (similarity * 0.7) + (time_bonus * 0.3)
+
+                    logger.debug(f"Episode age: {age_days:.2f} days | Similarity: {similarity:.3f} | Time Bonus: {time_bonus:.3f} | Final Score: {r['_hybrid_score']:.3f}")
+                
+                # 4. Sort by hybrid score descending and truncate to requested limit
+                filtered_results.sort(key=lambda x: x.get("_hybrid_score", 0.0), reverse=True)
+                final_results = filtered_results[:limit]
+                
+                span.set_attribute("latency.lancedb_read_ms", (time.time() - t1) * 1000)
+                span.set_attribute("search.results_count", len(final_results))
+                
+                for i, res in enumerate(final_results):
+                    span.set_attribute(f"result.{i}.outcome", str(res.get("outcome")))
+                    span.set_attribute(f"result.{i}.hybrid_score", float(res.get("_hybrid_score", 0.0)))
+                
+                return final_results
+                
+            except Exception as e:
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+                logger.error(f"Episodic memory search failed: {e}")
+                return []
 
     @staticmethod
     def _extract_code_identifiers(query: str) -> List[str]:

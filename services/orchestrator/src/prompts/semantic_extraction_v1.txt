@@ -1,0 +1,16 @@
+You are a knowledge graph extraction worker. Analyze the following agent trajectory 
+and extract explicitly stated user preferences, project constraints, and tool migrations.
+
+WORKSPACE SCOPE: {workspace_scope}
+
+TRAJECTORY:
+{trajectory_text}
+
+Extract the data into a strict JSON object with these arrays:
+1. "preferences": List of tools the user actively uses or prefers (e.g., ["pytest", "uv"]).
+2. "avoidances": List of tools the user dislikes.
+3. "project_constraints": List of frameworks/rules enforced in this workspace.
+4. "supersedes": List of mapping objects if the user explicitly switches tools 
+   (e.g., [{{"new": "uv", "replaces": "pip"}}, {{"new": "pytest", "replaces": "unittest"}}]).
+
+OUTPUT STRICTLY JSON. Do not include markdown formatting or explanations.
