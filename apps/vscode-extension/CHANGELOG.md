@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.20.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.19.8...v0.20.0) (2026-11-03)
+
+
+### Features
+
+* **memory:** Episodic & User Preference ([9f0d47a](https://github.com/qcbit/local-agentic-workspace/commit/9f0d47a12b6e11f8b03bcae5fce6b745454871e1))
+
+
+### Bug Fixes
+
+* **CI:** trigger manual release build ([908891c](https://github.com/qcbit/local-agentic-workspace/commit/908891c15b31995c4e3f462ef23745a23f919e7f))
+
 ## [0.19.8](https://github.com/qcbit/local-agentic-workspace/compare/v0.19.7...v0.19.8) (2026-10-31)
 
 
