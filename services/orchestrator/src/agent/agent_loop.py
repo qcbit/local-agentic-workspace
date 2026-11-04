@@ -427,9 +427,12 @@ class Agent:
 
             with logger.contextualize(run_id=self.state.run_id):
                 budget_exhausted = False
-                tool_descriptions = "\n".join(
-                    [f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()]
-                )
+                if hasattr(self.tool_registry, "get_formatted_tool_descriptions"):
+                    tool_descriptions = self.tool_registry.get_formatted_tool_descriptions()
+                else:
+                    tool_descriptions = "\n".join(
+                        [f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()]
+                    )
 
                 # --- Load system prompt from external template file ---
                 from services.orchestrator.src.prompts import load_prompt
@@ -652,13 +655,25 @@ class Agent:
 
                         dispatcher_tools = ["file_system", "terminal_proxy", "python_repl", "apply_inline_diff"]
 
+                        # --- Canonicalize aliases & validate required schema arguments ---
+                        if hasattr(self.tool_registry, "canonicalize_tool_args"):
+                            tool_args = self.tool_registry.canonicalize_tool_args(tool_name, tool_args)
+                        schema_err = (
+                            self.tool_registry.validate_tool_args(tool_name, tool_args)
+                            if hasattr(self.tool_registry, "validate_tool_args")
+                            else None
+                        )
+
                         # --- Guardrail 1: Block forbidden shell file-reads/greps ---
                         shell_block_msg = self._is_forbidden_shell_search(tool_name, tool_args)
 
                         # --- Guardrail 2: Duplicate Tool-Call & File-Inspection Circuit Breaker ---
                         exact_sig, target_file = self._normalize_tool_signature(tool_name, tool_args)
 
-                        if shell_block_msg:
+                        if schema_err:
+                            observation = schema_err
+                            iter_span.set_attribute("harness.guardrail_triggered", "invalid_tool_arguments")
+                        elif shell_block_msg:
                             observation = shell_block_msg
                             iter_span.set_attribute("harness.guardrail_triggered", "forbidden_shell_search")
                         else:

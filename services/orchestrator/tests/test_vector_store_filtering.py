@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-from rag.vector_store import LocalVectorStore
+from services.orchestrator.src.rag.vector_store import LocalVectorStore
 
 
 class FakeEmbedder:
@@ -18,9 +18,9 @@ class FakeEmbedder:
 def vector_store(tmp_path: Path):
     """Initializes LocalVectorStore backed by a real LanceDB table in tmp_path with mocked ONNX models."""
     with (
-        patch("rag.vector_store.TextEmbedding", return_value=FakeEmbedder()),
-        patch("rag.vector_store.SemanticChunker") as MockChunker,
-        patch("rag.vector_store.get_reranker", return_value=None),
+        patch("services.orchestrator.src.rag.vector_store.TextEmbedding", return_value=FakeEmbedder()),
+        patch("services.orchestrator.src.rag.vector_store.SemanticChunker") as MockChunker,
+        patch("services.orchestrator.src.rag.vector_store.get_reranker", return_value=None),
     ):
         chunker_instance = MagicMock()
         # Default behavior: treat each paragraph separated by double-newline as a chunk
@@ -75,7 +75,7 @@ def test_reconcile_database_purges_deleted_and_newly_excluded_files(
 
     vector_store.reconcile_database()
 
-    remaining_df = vector_store.table.search().limit(None).to_df()
+    remaining_df = vector_store.table.search().limit(None).to_pandas()
     remaining_paths = set(remaining_df["file_path"].tolist())
 
     assert remaining_paths == {str(valid_file)}
@@ -97,7 +97,7 @@ def test_semantic_search_identifier_boost_and_test_doc_demotion(
         'elif method == "reset_session":\n    self.persistent_agent = None',
     )
 
-    with patch("rag.vector_store.get_reranker", return_value=None):
+    with patch("services.orchestrator.src.rag.vector_store.get_reranker", return_value=None):
         results = vector_store.semantic_search("reset_session", limit=3)
 
     assert len(results) == 3
@@ -119,7 +119,7 @@ def test_semantic_search_path_prefix_and_per_file_diversity_cap(
     vector_store.upsert_file(tui_file, "h_tui", tui_content)
     vector_store.upsert_file(ext_file, "h_ext", ext_content)
 
-    with patch("rag.vector_store.get_reranker", return_value=None):
+    with patch("services.orchestrator.src.rag.vector_store.get_reranker", return_value=None):
         # 1. Test diversity cap (max_chunks_per_file=2)
         all_results = vector_store.semantic_search("New Chat", limit=5, max_chunks_per_file=2)
         tui_hits = [r for r in all_results if r["file_path"] == tui_file]

@@ -3,7 +3,9 @@ import difflib
 import json
 from loguru import logger
 import os
+import re
 import subprocess
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from services.orchestrator.src.tools.sandbox import (
@@ -97,7 +99,8 @@ class ToolDispatcher:
 
         if action == "read":
             forbidden_files = [".env", ".agentic_config.json", "secrets.json"]
-            if any(f in path for f in forbidden_files):
+            path_parts = Path(path).parts
+            if any(f in path_parts for f in forbidden_files):
                 return "❌ Security Sandbox Violation: Access to configuration and environment files is strictly prohibited."
 
             if os.path.isdir(path):
@@ -170,9 +173,9 @@ class ToolDispatcher:
         else:
             logger.info(f"🔓 [Sandbox Bypass Active] Skipping static validation for: '{command}'")
 
-        command_lower = command.lower()
-        if any(forbidden in command_lower.split() for forbidden in self.shell_deny_list):
-            return f"SECURITY VIOLATION: Command execution blocked. '{command}' contains forbidden keywords."
+        base_commands = [cmd.strip().split()[0].lower() for cmd in re.split(r'&&|;|\|', command) if cmd.strip()]
+        if any(forbidden in base_commands for forbidden in self.shell_deny_list):
+            return f"SECURITY VIOLATION: Command execution blocked. Contains forbidden base command."
         
         if auto_approve:
             logger.info(f"⚡ [Auto-Approve] Silently executing '{command}'...")
@@ -265,7 +268,10 @@ class ToolDispatcher:
         if len(search_string) > 1000:
             return "Error: search_string is too large. You must target a specific function or block of code (under 1000 characters), not the entire file or class."
 
-        abs_target = os.path.abspath(os.path.expanduser(path))
+        expanded_path = os.path.expanduser(path)
+        if not os.path.isabs(expanded_path):
+            expanded_path = os.path.join(self.workspace_root, expanded_path)
+        abs_target = os.path.abspath(expanded_path)
         abs_workspace = os.path.abspath(self.workspace_root)
         if self.sandbox_config.get("strict_mode", True) and not abs_target.startswith(abs_workspace):
             return f"Error: Path '{path}' is outside authorized workspace root."
