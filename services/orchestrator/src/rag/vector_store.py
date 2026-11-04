@@ -593,3 +593,23 @@ class LocalVectorStore:
 
         except Exception as e:
             logger.error(f"Failed to run database reconciliation sweep: {e}")
+
+        # Run episodic TTL eviction (e.g., delete trajectories older than 30 days)
+        self.prune_old_episodes(max_age_days=30)
+
+    def prune_old_episodes(self, max_age_days: int = 30):
+        """Physically deletes episodic memories older than the TTL window."""
+        if "episodes" not in self.db.table_names():
+            return
+            
+        try:
+            cutoff_time = int(time.time()) - (max_age_days * 86400)
+            # LanceDB supports SQL predicates for targeted deletion
+            self.episode_table.delete(f"timestamp < {cutoff_time}")
+            
+            # Optional: Run table optimization to physically reclaim disk space
+            self.episode_table.optimize()
+            
+            logger.info(f"🧹 Pruned episodic memories older than {max_age_days} days.")
+        except Exception as e:
+            logger.error(f"Failed to prune old episodes: {e}")
