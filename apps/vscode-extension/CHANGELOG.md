@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.20.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.1...v0.20.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **memory:** Prune old episodes ([af610b0](https://github.com/qcbit/local-agentic-workspace/commit/af610b0afe3001b9cde912522d885013e6cd34ba))
+* **memory:** Prune old episodes ([f4964c3](https://github.com/qcbit/local-agentic-workspace/commit/f4964c3420e7e326ac8fda79527cec97cd651336))
+
 ## [0.20.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.0...v0.20.1) (2026-11-04)
 
 
