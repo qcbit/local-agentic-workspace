@@ -101,7 +101,7 @@ jobs:
         run: |
           cd apps/vscode-extension
           # --target tells VS Code this extension is ONLY for this specific OS/CPU
-          npx vsce package --target ${{ matrix.target }}
+          npx @vscode/vsce package --target ${{ matrix.target }}
         shell: bash
 
       # 🎯 3. Upload to the Release
