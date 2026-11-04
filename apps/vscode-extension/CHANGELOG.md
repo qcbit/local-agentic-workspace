@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.1](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.0...v0.20.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **CI:** update vscode engine and deprecated libs ([55fc76b](https://github.com/qcbit/local-agentic-workspace/commit/55fc76b39f04bd44ea47cbcded7c038faf60abce))
+
 ## [0.20.0](https://github.com/qcbit/local-agentic-workspace/compare/v0.19.8...v0.20.0) (2026-11-03)
 
 
