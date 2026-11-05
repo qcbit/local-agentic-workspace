@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.4](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.3...v0.20.4) (2026-11-05)
+
+
+### Bug Fixes
+
+* **tools:** sync extension manifest with dispatcher schema ([3f5fd4f](https://github.com/qcbit/local-agentic-workspace/commit/3f5fd4f260311c86a6f59f3a05f82062f9a54dab))
+
 ## [0.20.3](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.2...v0.20.3) (2026-11-05)
 
 
