@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.3](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.2...v0.20.3) (2026-11-05)
+
+
+### Bug Fixes
+
+* **tools:** Tools schema & dispatcher function sync ([8abed2b](https://github.com/qcbit/local-agentic-workspace/commit/8abed2b835b5119e8c85cb0e15b589383800a7e1))
+
 ## [0.20.2](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.1...v0.20.2) (2026-11-04)
 
 
