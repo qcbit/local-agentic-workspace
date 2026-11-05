@@ -126,13 +126,16 @@ class LocalVectorStore:
             pa.field("content", pa.string()),
         ])
 
-        if self.table_name in self.db.table_names():
+        # Bulletproof initialization (bypasses list_tables() API changes entirely)
+        try:
             self.table = self.db.open_table(self.table_name)
+            # Handle migrations from the legacy 768-dim schema
             if self.table.schema.field("vector").type.list_size != 384:
                 self.db.drop_table(self.table_name)
                 self.table = self.db.create_table(self.table_name, schema=schema)
-        else:
-            self.table = self.db.create_table(self.table_name, schema=schema)
+        except Exception:
+            # If open_table fails, the table doesn't exist yet
+            self.table = self.db.create_table(self.table_name, schema=schema, exist_ok=True)
 
         # 2. Load FastEmbed (ONNX CPU Runtime)
         logger.info("Loading FastEmbed ONNX model...")
@@ -142,10 +145,11 @@ class LocalVectorStore:
         logger.info("Initializing Semantic Chunker...")
         self.chunker = SemanticChunker()
 
-        if "episodes" not in self.db.table_names():
-            self.db.create_table("episodes", schema=episodic_schema)
+        try:
+            self.episode_table = self.db.open_table("episodes")
+        except Exception:
+            self.episode_table = self.db.create_table("episodes", schema=episodic_schema, exist_ok=True)
             logger.info("Created episodic memory table in LanceDB.")
-        self.episode_table = self.db.open_table("episodes")
 
     @staticmethod
     def _escape_sql_string(val: str) -> str:
@@ -213,7 +217,7 @@ class LocalVectorStore:
         """Queries LanceDB for the stored hash of a given file_path."""
         try:
             safe_path = self._escape_sql_string(file_path)
-            df = self.table.search().where(f"file_path = '{safe_path}'").limit(1).to_df()
+            df = self.table.search().where(f"file_path = '{safe_path}'").limit(1).to_pandas()
             if df is not None and len(df) > 0:
                 return df.iloc[0]["file_hash"]
         except Exception as e:
@@ -319,8 +323,12 @@ class LocalVectorStore:
         """Embeds the current goal and retrieves past episodes with time-decay hybrid scoring."""
         import math
         
-        if "episodes" not in self.db.table_names():
-            return []
+        if not hasattr(self, "episode_table"):
+            try:
+                self.episode_table = self.db.open_table("episodes")
+            except Exception:
+                logger.warning("episodes table does not exist yet.")
+                return []
             
         with tracer.start_as_current_span("episodic_memory_read") as span:
             span.set_attribute("search.query", query)
@@ -440,9 +448,9 @@ class LocalVectorStore:
         max_chunks_per_file: int = 2,
     ) -> List[Dict[str, Any]]:
         if not hasattr(self, "table"):
-            if self.table_name in self.db.table_names():
+            try:
                 self.table = self.db.open_table(self.table_name)
-            else:
+            except Exception:
                 logger.warning("Table does not exist yet. Please index files first.")
                 return []
 
@@ -571,7 +579,7 @@ class LocalVectorStore:
             return
 
         try:
-            df = self.table.search().limit(None).to_df()
+            df = self.table.search().limit(None).to_pandas()
             if df is None or df.empty or "file_path" not in df.columns:
                 return
 
@@ -599,8 +607,11 @@ class LocalVectorStore:
 
     def prune_old_episodes(self, max_age_days: int = 30):
         """Physically deletes episodic memories older than the TTL window."""
-        if "episodes" not in self.db.table_names():
-            return
+        if not hasattr(self, "episode_table"):
+            try:
+                self.episode_table = self.db.open_table("episodes")
+            except Exception:
+                return
             
         try:
             cutoff_time = int(time.time()) - (max_age_days * 86400)

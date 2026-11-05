@@ -1,6 +1,8 @@
+import asyncio
+import json
 import logging
 import re
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 from services.orchestrator.src.agent.ast_parser import CodebaseASTParser
 from services.orchestrator.src.rag.search_manager import SearchManager
@@ -14,13 +16,13 @@ class ToolRegistry:
     def __init__(self, uds_server=None, config: Optional[Dict[str, Any]] = None):
         self.uds_server = uds_server
         self.config = config or {}
-        
+
         # Reuse existing loaded LanceDB/ONNX models from server to avoid double memory footprint
-        if self.uds_server and hasattr(self.uds_server, 'vector_store'):
+        if self.uds_server and hasattr(self.uds_server, "vector_store"):
             self.vector_store = self.uds_server.vector_store
         else:
             self.vector_store = LocalVectorStore(config=self.config)
-            
+
         self.search_manager = SearchManager(uds_server=self.uds_server, vector_store=self.vector_store)
 
         self.tools = {
@@ -31,11 +33,11 @@ class ToolRegistry:
                     "type": "object",
                     "properties": {
                         "symbol": {"type": "string", "description": "The name of the class, function, or variable."},
-                        "file_path": {"type": "string", "description": "Absolute path to the active file."},
+                        "file_path": {"type": "string", "description": "Path to the file containing the symbol."},
                         "line": {"type": "integer", "description": "The 1-indexed line number shown in the editor."},
                         "character": {"type": "integer", "description": "The 0-indexed character column position."},
                     },
-                    "required": ["symbol", "file_path", "line", "character"],
+                    "required": ["symbol", "file_path"],
                 },
             },
             "extract_code_structure": {
@@ -44,15 +46,15 @@ class ToolRegistry:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "file_path": {"type": "string", "description": "Absolute path to the file."},
-                        "line_number": {"type": "integer", "description": "0-indexed line number."},
+                        "file_path": {"type": "string", "description": "Path to the target file."},
+                        "line_number": {"type": "integer", "description": "The 0-indexed absolute line number in the file (any line within the target class/function)."},
                     },
                     "required": ["file_path", "line_number"],
                 },
             },
             "terminal_proxy": {
                 "name": "terminal_proxy",
-                "description": "Executes a shell command. Use this for running tests, compiling, or executing scripts.",
+                "description": "Executes a shell command. Use this ONLY for running tests, compiling, or executing scripts (NEVER for grep/cat/sed/awk file reading).",
                 "parameters": {
                     "type": "object",
                     "properties": {"command": {"type": "string", "description": "The bash command to execute."}},
@@ -61,13 +63,20 @@ class ToolRegistry:
             },
             "file_system": {
                 "name": "file_system",
-                "description": "Reads or writes files to the local disk.",
+                "description": "Reads a file/directory or writes a full file to disk. For partial edits to existing files, prefer apply_inline_diff.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "description": "Either 'read' or 'write'."},
-                        "path": {"type": "string", "description": "The target file path."},
-                        "content": {"type": "string", "description": "The string to write (required if action is 'write')."},
+                        "action": {
+                            "type": "string",
+                            "enum": ["read", "write"],
+                            "description": "Either 'read' (for a file or directory listing) or 'write'.",
+                        },
+                        "path": {"type": "string", "description": "The target file or directory path."},
+                        "content": {
+                            "type": "string",
+                            "description": "The full string content to write (required when action is 'write').",
+                        },
                     },
                     "required": ["action", "path"],
                 },
@@ -78,9 +87,16 @@ class ToolRegistry:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "summary": {"type": "string", "description": "The comprehensive final answer or requested information."}
+                        "summary": {
+                            "type": "string",
+                            "description": "The comprehensive final answer or summary of changes made.",
+                        },
+                        "success": {
+                            "type": "boolean",
+                            "description": "True if the task succeeded, False if reporting an unrecoverable failure.",
+                        },
                     },
-                    "required": ["summary"],
+                    "required": ["summary", "success"],
                 },
             },
             "web_search": {
@@ -99,9 +115,9 @@ class ToolRegistry:
                     "type": "object",
                     "properties": {
                         "command": {"type": "string", "description": "The VS Code command ID."},
-                        "target_path": {"type": "string", "description": "The absolute path to the file or folder"},
+                        "target_path": {"type": "string", "description": "Optional — only needed for path-aware commands (vscode.open, vscode.openFolder)."},
                     },
-                    "required": ["command", "target_path"],
+                    "required": ["command"],
                 },
             },
             "validate_python_syntax": {
@@ -126,13 +142,19 @@ class ToolRegistry:
                 "name": "search_codebase",
                 "description": (
                     "Searches the workspace codebase using hybrid semantic and lexical search. "
-                    "Args: {'query': 'search terms or identifier', 'path_prefix': 'optional subdirectory filter e.g. apps/vscode-extension', 'limit': 5}. "
                     "ALWAYS prefer this tool over shell grep/find."
                 ),
                 "handler": self._search_codebase_async,
                 "parameters": {
                     "type": "object",
-                    "properties": {"query": {"type": "string", "description": "The semantic search query"}, "path_prefix": {"type": "string", "description": "The path prefix to filter results"}},
+                    "properties": {
+                        "query": {"type": "string", "description": "Search terms or exact code identifier."},
+                        "path_prefix": {
+                            "type": "string",
+                            "description": "Optional subdirectory filter (e.g. 'apps/vscode-extension').",
+                        },
+                        "limit": {"type": "integer", "description": "Max results to return (default 5)."},
+                    },
                     "required": ["query"],
                 },
             },
@@ -153,7 +175,7 @@ class ToolRegistry:
                     "type": "object",
                     "properties": {
                         "file_path": {"type": "string", "description": "Target file path."},
-                        "search_string": {"type": "string", "description": "The EXACT string block to be replaced."},
+                        "search_string": {"type": "string", "description": "The EXACT string block to be replaced (under 1000 chars)."},
                         "replace_string": {"type": "string", "description": "The new string block to insert."},
                     },
                     "required": ["file_path", "search_string", "replace_string"],
@@ -166,22 +188,140 @@ class ToolRegistry:
                 self.tools.pop(tool_name, None)
             logger.info("🖥️ [TUI Mode] VS Code specific tools disabled.")
 
+    def get_formatted_tool_descriptions(self) -> str:
+        """Formats tool descriptions with explicit parameter names, types, enums, and required flags."""
+        lines = []
+        for name, info in self.tools.items():
+            desc = info.get("description", "")
+            params = info.get("parameters", {})
+            props = params.get("properties", {})
+            req = set(params.get("required", []))
+
+            if props:
+                param_strs = []
+                for p_name, p_info in props.items():
+                    p_type = p_info.get("type", "any")
+                    p_desc = p_info.get("description", "")
+                    opt_marker = "" if p_name in req else "?"
+                    enum_vals = p_info.get("enum")
+                    if enum_vals:
+                        p_type = "|".join(f"'{v}'" for v in enum_vals)
+                    param_strs.append(f'"{p_name}"{opt_marker}: <{p_type}> ({p_desc})')
+                args_schema = "{ " + ", ".join(param_strs) + " }"
+            else:
+                args_schema = "{}"
+
+            lines.append(f"- {name}: {desc}\n  tool_args schema: {args_schema}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def canonicalize_tool_args(tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalizes common LLM parameter aliases into the canonical schema keys."""
+        if not isinstance(tool_args, dict):
+            return {}
+        args = dict(tool_args)
+
+        if tool_name == "file_system":
+            if "path" not in args:
+                for alias in ("file_path", "filepath", "file", "target_path", "directory"):
+                    if alias in args:
+                        args["path"] = args.pop(alias)
+                        break
+        elif tool_name in ("apply_inline_diff", "extract_code_structure", "get_symbol_references"):
+            if "file_path" not in args:
+                for alias in ("path", "filepath", "file", "uri", "file_uri", "target_path"):
+                    if alias in args:
+                        args["file_path"] = args.pop(alias)
+                        break
+            if tool_name == "apply_inline_diff":
+                if "search_string" not in args:
+                    for alias in ("search", "original_string", "old_str", "find"):
+                        if alias in args:
+                            args["search_string"] = args.pop(alias)
+                            break
+                if "replace_string" not in args:
+                    for alias in ("replace", "new_string", "new_str", "replacement"):
+                        if alias in args:
+                            args["replace_string"] = args.pop(alias)
+                            break
+            elif tool_name == "extract_code_structure":
+                if "line_number" not in args and "line" in args:
+                    args["line_number"] = args.pop("line")
+            elif tool_name == "get_symbol_references":
+                if "line" not in args and "line_number" in args:
+                    args["line"] = args.pop("line_number")
+                if "character" not in args:
+                    for alias in ("character_position", "char", "column", "col"):
+                        if alias in args:
+                            args["character"] = args.pop(alias)
+                            break
+
+        elif tool_name == "search_codebase":
+            if "query" not in args:
+                for alias in ("search_query", "pattern", "term", "keyword"):
+                    if alias in args:
+                        args["query"] = args.pop(alias)
+                        break
+            if "path_prefix" not in args:
+                for alias in ("path", "directory", "dir", "folder", "scope"):
+                    if alias in args:
+                        args["path_prefix"] = args.pop(alias)
+                        break
+
+        elif tool_name == "terminal_proxy":
+            if "command" not in args:
+                for alias in ("cmd", "shell_command", "script", "bash"):
+                    if alias in args:
+                        args["command"] = args.pop(alias)
+                        break
+
+        return args
+
+    def validate_tool_args(self, tool_name: str, tool_args: Dict[str, Any]) -> Optional[str]:
+        """Validates tool_args against the tool's JSON schema and returns an actionable error hint if invalid."""
+        if tool_name not in self.tools:
+            return None
+        schema = self.tools[tool_name].get("parameters", {})
+        props = schema.get("properties", {})
+        required = schema.get("required", [])
+
+        # 1. Check missing required arguments
+        missing = [
+            req_key
+            for req_key in required
+            if req_key not in tool_args or tool_args[req_key] is None or tool_args[req_key] == ""
+        ]
+        if missing:
+            expected_sig = {k: v.get("type", "any") for k, v in props.items()}
+            return (
+                f"Error [Invalid Tool Arguments]: Missing required parameter(s) {missing} for tool '{tool_name}'. "
+                f"You passed keys {list(tool_args.keys())}, but '{tool_name}' requires schema: {json.dumps(expected_sig)}."
+            )
+
+        # 2. Check enum constraints & integer string coercion
+        for key, val in list(tool_args.items()):
+            if key in props:
+                allowed_enums = props[key].get("enum")
+                if allowed_enums and val not in allowed_enums:
+                    return (
+                        f"Error [Invalid Tool Arguments]: Invalid value '{val}' for parameter '{key}' in '{tool_name}'. "
+                        f"Allowed values are: {allowed_enums}."
+                    )
+                if props[key].get("type") == "integer" and isinstance(val, str) and val.strip().isdigit():
+                    tool_args[key] = int(val.strip())
+
+        # 3. Special check for file_system write requiring content
+        if tool_name == "file_system" and tool_args.get("action") == "write" and "content" not in tool_args:
+            return "Error [Invalid Tool Arguments]: Parameter 'content' is required when file_system action is 'write'."
+
+        return None
+
     async def execute_tool_async(self, tool_name: str, arguments: dict) -> Optional[str]:
         try:
+            arguments = self.canonicalize_tool_args(tool_name, arguments)
+
             if tool_name == "search_codebase":
-                query = arguments.get("query")
-                if not isinstance(query, str) or not query.strip():
-                    return "Error: search query must be a non-empty string."
-
-                results = self.vector_store.semantic_search(query, limit=3)
-                if not results:
-                    return "No relevant codebase results found."
-
-                formatted_response = "Codebase Search Results:\n\n"
-                for i, res in enumerate(results):
-                    formatted_response += f"--- Result {i+1} (File: {res.get('file_path')}) ---\n"
-                    formatted_response += f"{res.get('content')}\n\n"
-                return formatted_response
+                return await self._search_codebase_async(arguments)
 
             elif tool_name == "vscode_command":
                 if not self.uds_server:
@@ -218,9 +358,9 @@ class ToolRegistry:
                 if not self.uds_server:
                     return "Error: IPC Server not attached to ToolRegistry."
 
-                path_arg = arguments.get("file_path") or arguments.get("file_uri") or arguments.get("uri")
-                line_arg = arguments.get("line") or arguments.get("line_number") or 0
-                char_arg = arguments.get("character") or arguments.get("character_position") or arguments.get("char") or 0
+                path_arg = arguments.get("file_path")
+                line_arg = arguments.get("line", 0)
+                char_arg = arguments.get("character", 0)
                 symbol_arg = arguments.get("symbol")
 
                 if not path_arg:
@@ -305,7 +445,7 @@ class ToolRegistry:
             elif tool_name == "extract_code_structure":
                 ast_parser = CodebaseASTParser()
                 return ast_parser.get_node_at_line(
-                    arguments.get("file_path"), arguments.get("line_number", 0)
+                    arguments.get("file_path"), int(arguments.get("line_number", 0))
                 )
             else:
                 return f"Tool {tool_name} not found."
@@ -319,7 +459,6 @@ class ToolRegistry:
             return "Error: 'query' argument is required for search_codebase."
 
         limit = int(args.get("limit", 5))
-        # Support 'path_prefix' along with common alias hallucinations ('path', 'directory')
         path_prefix = (
             args.get("path_prefix")
             or args.get("path")
@@ -329,12 +468,12 @@ class ToolRegistry:
         if isinstance(path_prefix, str):
             path_prefix = path_prefix.strip() or None
 
-        if not self.uds_server or not getattr(self.uds_server, "vector_store", None):
+        if not self.vector_store:
             return "Error: Vector store is not initialized."
 
         try:
             results = await asyncio.to_thread(
-                self.uds_server.vector_store.semantic_search,
+                self.vector_store.semantic_search,
                 query=query,
                 limit=limit,
                 path_prefix=path_prefix,
