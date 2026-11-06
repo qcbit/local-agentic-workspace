@@ -449,9 +449,17 @@ class JsonRpcUdsServer:
                 return self._success_response(req_id, "pong")
                 
             elif method == "execute_agent_task":
-                goal = params.get("goal")
+                # 1. Extract goal and workflow safely
+                goal = params.get("goal", "").strip()
+                workflow_config = params.get("workflow_config")
+                
+                # 2. Relax the goal requirement if a workflow description exists
                 if not goal:
-                    return self._error_response(req_id, -32602, "Invalid params: 'goal' is required")
+                    if workflow_config and "description" in workflow_config:
+                        goal = workflow_config.get("description", "Execute the workflow.")
+                        logger.info(f"🧠 Goal defaulted from workflow description: {goal}")
+                    else:
+                        return self._error_response(req_id, -32602, "Invalid params: 'goal' is required (or provide a valid workflow_config)")
 
                 is_auto_approve = extract_auto_approve(params)
                 if isinstance(is_auto_approve, str):

@@ -1,0 +1,24 @@
+{
+  "id": "git_rebase_pr",
+  "name": "Git Interactive Rebase & PR",
+  "description": "Interactive rebase to squash/pick commits, then open a PR with a conventional-commit message.",
+  "orchestrator_config": {
+    "max_iterations": 25,
+    "auto_approve_tools": false,
+    "sandbox": { "strict_mode": false }
+  },
+  "context_engineering": {
+    "role": "You are an expert Git release manager.",
+    "task": "Perform an interactive rebase to squash commits, then open a PR.",
+    "constraints": [
+      "PHASE 1: Run `git status`, `git log --oneline main..HEAD`, and `git diff --stat main..HEAD` to group changes.",
+      "PHASE 2: Determine conventional-commit types (feat, fix, chore, refactor, perf) for each group.",
+      "PHASE 3: Create branch `rebase/<slug>` and rebase interactively targeting `main`.",
+      "PHASE 4: Push the branch and create the PR using `gh pr create` with the full changelog in the body.",
+      "PHASE 5: Verify CI passes with `gh pr status`. Do NOT merge the PR."
+    ],
+    "failure_behavior": "If a rebase conflicts, abort the rebase and notify the user.",
+    "output_contract": "Call 'finish_task' when the PR is open, CI is green, and the user is ready to review."
+  },
+  "pre_flight_actions": []
+}

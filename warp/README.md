@@ -8,7 +8,8 @@ Context engineering is the practice of designing goals, instructions, constraint
 
 Each workflow is a JSON object containing the operating manual for the LLM.
 
-*   **`orchestrator_config`**: Dynamically overrides `.agentic_config.json` for the duration of the task. Useful for enforcing strict sandboxes or disabling web search for sensitive audits.
+*   **`description`**: A plain-text summary of the task. If a user invokes a workflow without providing a custom goal, the orchestrator automatically injects this description as the primary objective.
+*   **`orchestrator_config`**: Dynamically overrides `.agentic_config.json` for the duration of the task. Useful for enforcing strict sandboxes or disabling tools.
 *   **`context_engineering`**: Injects an operating manual into the agent's `system_prompt`.
 *   **`pre_flight_actions`**: An array of tool calls the orchestrator executes *before* the first LLM generation. This seeds the context window with immediate data, reducing token costs and iteration cycles.
 
