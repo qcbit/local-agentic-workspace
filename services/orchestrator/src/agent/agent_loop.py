@@ -39,6 +39,7 @@ class Agent:
         uds_server=None,
         workspace_root: Optional[str] = None,
         permission_callback=None,
+        session_id: Optional[str] = None,
     ):
         self.llm_provider = llm_provider
         self.uds_server = uds_server
@@ -48,6 +49,7 @@ class Agent:
         self.auto_approve = False
         self.user_inbox = asyncio.Queue()
         self.state = AgentState(user_goal="")
+        self.state.run_id = session_id or str(uuid.uuid4())
 
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
@@ -323,6 +325,32 @@ class Agent:
             # --- Trigger Async DB Rehydration Before Generating Context ---
             if getattr(self.memory, "rehydrate", None):
                 await self.memory.rehydrate()
+
+                normalized_history = []
+                for item in self.state.history:
+                    if hasattr(item, "role") and hasattr(item, "content"):
+                        normalized_history.append(item)
+                    elif isinstance(item, dict):
+                        role_str = str(item.get("role", "user")).lower()
+                        raw_content = item.get("content", "")
+                        # Decode JSON payload from SQLite
+                        if isinstance(raw_content, str):
+                            try:
+                                raw_content = json.loads(raw_content)
+                            except Exception:
+                                pass
+                        try:
+                            role_enum = Role(role_str)
+                        except ValueError:
+                            role_enum = Role.USER
+                        normalized_history.append(Message(role=role_enum, content=raw_content))
+                    elif isinstance(item, str):
+                        try:
+                            raw_content = json.loads(item)
+                        except Exception:
+                            raw_content = item
+                        normalized_history.append(Message(role=Role.USER, content=raw_content))
+                self.state.history = normalized_history
 
             def log(msg: str):
                 if ui_callback:

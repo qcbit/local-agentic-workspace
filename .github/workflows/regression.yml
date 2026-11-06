@@ -11,6 +11,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: regression-${{ github.ref }}
   cancel-in-progress: true
