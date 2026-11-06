@@ -228,8 +228,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             const workflowId = workflowMatch[1];
             cleanGoal = workflowMatch[2].trim();
             
-            const monorepoRoot = path.resolve(this._extensionUri.fsPath, '../../');
-            const workflowPath = path.join(monorepoRoot, 'warp', 'workflows', `${workflowId}.json`);
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+            const workflowPath = path.join(workspaceRoot, 'warp', 'workflows', `${workflowId}.json`);
             
             if (fs.existsSync(workflowPath)) {
                 workflowConfig = JSON.parse(fs.readFileSync(workflowPath, 'utf8'));
