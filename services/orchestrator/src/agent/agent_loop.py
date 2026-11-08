@@ -732,6 +732,11 @@ class Agent:
                         # --- Guardrail 2: Duplicate Tool-Call & File-Inspection Circuit Breaker ---
                         exact_sig, target_file = self._normalize_tool_signature(tool_name, tool_args)
 
+                        # Move increments up here so blocked calls (like forbidden shell greps) count toward the limit
+                        call_counts[exact_sig] = call_counts.get(exact_sig, 0) + 1
+                        if target_file:
+                            file_read_counts[target_file] = file_read_counts.get(target_file, 0) + 1
+
                         if schema_err:
                             observation = schema_err
                             iter_span.set_attribute("harness.guardrail_triggered", "invalid_tool_arguments")
@@ -739,10 +744,6 @@ class Agent:
                             observation = shell_block_msg
                             iter_span.set_attribute("harness.guardrail_triggered", "forbidden_shell_search")
                         else:
-                            call_counts[exact_sig] = call_counts.get(exact_sig, 0) + 1
-                            if target_file:
-                                file_read_counts[target_file] = file_read_counts.get(target_file, 0) + 1
-
                             if target_file and file_read_counts[target_file] > 2:
                                 observation = (
                                     f"Error [Circuit Breaker]: You have already read or searched `{target_file}` "

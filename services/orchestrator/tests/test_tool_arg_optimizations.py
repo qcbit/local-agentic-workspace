@@ -178,14 +178,19 @@ async def test_agent_loop_canonicalization_validation_and_circuit_breakers(tmp_p
 
     # Turn 1: Schema validation error
     assert "Error [Invalid Tool Arguments]" in tool_obs[0]
-    # Turn 2: Shell grep blocked
+    
+    # Turn 2: Shell grep blocked (This now counts as Attempt 1 for ChatPanel.tsx)
     assert "Using `terminal_proxy` for `grep`" in tool_obs[1]
-    # Turn 3: 1st valid file read
-    assert tool_obs[2] == "File content: export const ChatPanel..."
-    # Turn 4: 2nd valid file read carries harness warning
-    assert "2nd time reading `ChatPanel.tsx`" in tool_obs[3]
-    # Turn 5: 3rd file read blocked by circuit breaker
+    
+    # Turn 3: 1st valid file read (Count = 2, triggers warning + content)
+    assert "File content: export const ChatPanel..." in tool_obs[2]
+    assert "2nd time reading `ChatPanel.tsx`" in tool_obs[2]
+    
+    # Turn 4: 2nd valid file read (Count = 3, blocked by circuit breaker)
+    assert "Error [Circuit Breaker]" in tool_obs[3]
+    
+    # Turn 5: 3rd valid file read (Count = 4, blocked by circuit breaker)
     assert "Error [Circuit Breaker]" in tool_obs[4]
 
     # Dispatcher was only called twice (Turns 3 and 4)
-    assert agent.dispatcher.execute_async.call_count == 2
+    assert agent.dispatcher.execute_async.call_count == 1
