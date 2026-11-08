@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    ".vscode-test",
+    "out",
+    "src/test/ChatHistory.test.ts",
+    "src/test/test_ast.spec.ts",
+    "src/test/setupTests.ts"
+  ],
+  "include": [
+    "src/**/*"
+  ]
+}
