@@ -156,6 +156,14 @@ class ToolRegistry:
                         "limit": {"type": "integer", "description": "Max results to return (default 5)."},
                     },
                     "required": ["query"],
+                    "limit": {
+                            "type": "integer", 
+                            "description": "Max results to return. Default is 5, but lower this to 1 or 2 if context window is nearly full."
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Number of results to skip for pagination (default 0). Use this to fetch the next set of results if a previous search was truncated."
+                        },
                 },
             },
             "get_active_file_content": {
@@ -459,6 +467,7 @@ class ToolRegistry:
             return "Error: 'query' argument is required for search_codebase."
 
         limit = int(args.get("limit", 5))
+        offset = int(args.get("offset", 0))
         path_prefix = (
             args.get("path_prefix")
             or args.get("path")
@@ -475,18 +484,21 @@ class ToolRegistry:
             results = await asyncio.to_thread(
                 self.vector_store.semantic_search,
                 query=query,
-                limit=limit,
+                limit=limit + offset,  # Fetch enough to cover the offset skip
                 path_prefix=path_prefix,
             )
         except Exception as e:
             return f"Error executing codebase search: {e}"
 
-        if not results:
-            scope_note = f" within '{path_prefix}'" if path_prefix else ""
-            return f"No codebase search results found for query '{query}'{scope_note}."
+        # Apply the pagination slice
+        paged_results = results[offset:]
 
-        formatted = ["Codebase Search Results:\n"]
-        for i, res in enumerate(results, start=1):
+        if not paged_results:
+            scope_note = f" within '{path_prefix}'" if path_prefix else ""
+            return f"No codebase search results found for query '{query}'{scope_note} (offset: {offset})."
+
+        formatted = [f"Codebase Search Results (Showing {limit} results, offset {offset}):\n"]
+        for i, res in enumerate(paged_results, start=offset + 1):
             file_path = res.get("file_path", "unknown")
             content = res.get("content", "")
             formatted.append(f"--- Result {i} (File: {file_path}) ---\n{content}\n")
