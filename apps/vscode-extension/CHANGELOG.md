@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.5](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.4...v0.20.5) (2026-11-10)
+
+
+### Bug Fixes
+
+* **context:** fuel gauge ([8fe700e](https://github.com/qcbit/local-agentic-workspace/commit/8fe700e674a3d0d7a570a22734c86185d593311a))
+
 ## [0.20.4](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.3...v0.20.4) (2026-11-06)
 
 
