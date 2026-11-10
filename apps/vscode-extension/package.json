@@ -12,7 +12,7 @@
   },
   "description": "Air-gapped local agentic coding assistant for VS Code with optimized tool dispatch and RAG pipeline",
   "engines": {
-    "vscode": "^1.144.0"
+    "vscode": "^1.145.0"
   },
   "main": "./out/extension.js",
   "activationEvents": [],
