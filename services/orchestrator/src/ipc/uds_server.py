@@ -704,7 +704,7 @@ class JsonRpcUdsServer:
                 if not session_id:
                     return self._error_response(req_id, -32602, "session_id is required to restore state.")
                 
-                self._ensure_agent()
+                self._ensure_agent(session_id=session_id)
                 self.persistent_agent.state.run_id = session_id
                 
                 # The agent loop will automatically call context_manager.rehydrate() 
@@ -763,9 +763,12 @@ class JsonRpcUdsServer:
         logger.info(f"🗑️ [IPC] delete_file called for: {file_path} (deleted={deleted})")
         return {"status": "success", "deleted_path": file_path, "deleted": bool(deleted)}
 
-    def _ensure_agent(self):
+    def _ensure_agent(self, session_id: Optional[str] = None):
         """Initializes the persistent agent if it doesn't exist."""
         if self.persistent_agent is not None:
+            # Sync the session_id to the existing agent if we are starting a new session
+            if session_id and not self.persistent_agent.state.history:
+                self.persistent_agent.state.run_id = session_id
             return
 
         active_profile_name = self.config.get("active_profile", "home")
@@ -786,7 +789,13 @@ class JsonRpcUdsServer:
         llm = UniversalLLMProvider(endpoint_url=endpoint, model=model_name, api_key=api_key)
         
         # workspace_root is defined globally at the top of uds_server.py
-        self.persistent_agent = Agent(llm_provider=llm, config=active_config, uds_server=self, workspace_root=workspace_root)
+        self.persistent_agent = Agent(
+            llm_provider=llm, 
+            config=active_config, 
+            uds_server=self, 
+            workspace_root=workspace_root,
+            session_id=session_id
+        )
 
     async def _run_agent_async(
         self,
@@ -797,7 +806,7 @@ class JsonRpcUdsServer:
         session_id: Optional[str] = None
     ):
         """Asynchronously instantiates and runs the agent."""
-        self._ensure_agent()
+        self._ensure_agent(session_id=session_id)
         if session_id and not self.persistent_agent.state.history:
             self.persistent_agent.state.run_id = session_id
         state = await self.persistent_agent.run(goal, auto_approve=auto_approve, workflow_config=workflow_config, history_payload=history)
