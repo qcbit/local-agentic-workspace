@@ -1,7 +1,7 @@
 {
   "name": "local-agentic-workspace",
   "displayName": "Local Agentic Workspace",
-  "version": "0.20.4",
+  "version": "0.20.6",
   "publisher": "Qcbit",
   "author": "Lance Truong",
   "license": "MIT",
@@ -12,7 +12,7 @@
   },
   "description": "Air-gapped local agentic coding assistant for VS Code with optimized tool dispatch and RAG pipeline",
   "engines": {
-    "vscode": "^1.144.0"
+    "vscode": "^1.145.0"
   },
   "main": "./out/extension.js",
   "activationEvents": [],
@@ -136,7 +136,7 @@
     "@types/node": "^26.6.6",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.3.0",
-    "@types/vscode": "^1.144.0",
+    "@types/vscode": "^1.145.0",
     "@vscode/test-electron": "^3.1.0",
     "chai": "^4.3.8",
     "esbuild": "^0.28.2",

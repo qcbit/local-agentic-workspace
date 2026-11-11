@@ -546,6 +546,22 @@ class Agent:
                                 "Did your last action succeed? State a NEW hypothesis before calling the next tool."
                             )
 
+                        # Calculate current pressure using your existing heuristic
+                        cptr = getattr(self.memory, "chars_per_token", 3.5)
+                        current_chars = sum(len(str(m.content)) for m in self.state.history)
+                        current_tokens = int(current_chars / cptr)
+                        max_tokens = self.memory.max_tokens
+
+                        context_pressure = (current_tokens / max_tokens) * 100
+
+                        volatile_state += (
+                            f"\n[Context Window Status]\n"
+                            f"Tokens Used: {current_tokens} / {max_tokens} ({context_pressure:.1f}%)\n"
+                        )
+
+                        if context_pressure > 85.0:
+                            volatile_state += "WARNING: Context window is nearly full. You MUST use precise tools (e.g., extract_code_structure, apply_inline_diff) and avoid large codebase searches or full file reads."
+
                         # 🎯 INVERT PROMPT STRUCTURE: Place the JSON contract at the absolute end
                         volatile_state += (
                             "\n\nFINAL DIRECTIVE: Your output MUST be a single valid JSON object with EXACTLY these keys: "
@@ -741,20 +757,40 @@ class Agent:
                                         f"- Iter {self.state.iterations + 1}: Inspected `{target_file}` via `{tool_name}` (Read #{file_read_counts[target_file]})"
                                     )
                             else:
+                                # Pre-execution hook setup
                                 if tool_name == "web_search":
                                     tool_args["run_id"] = self.state.run_id
                                     tool_args["search_config"] = self.search_config
                                     tool_args["max_chars"] = getattr(self.dispatcher, "max_file_read_chars", 4000)
+
+                                # --- Execute the tool asynchronously ---
                                 observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
+
+                                # Post-execution breadcrumb logging
                                 if tool_name == "search_codebase":
                                     q_str = tool_args.get("query", "")
                                     p_pref = tool_args.get("path_prefix") or tool_args.get("path")
+                                    offset_val = tool_args.get("offset", 0)
                                     scope_str = f" (in `{p_pref}`)" if p_pref else ""
+                                    offset_str = f" [offset: {offset_val}]" if offset_val > 0 else ""
                                     visited_breadcrumbs.append(
-                                        f"- Iter {self.state.iterations + 1}: Searched codebase for `{q_str}`{scope_str}"
+                                        f"- Iter {self.state.iterations + 1}: Searched codebase for `{q_str}`{scope_str}{offset_str}"
                                     )
 
                         log(f"[bold blue]\U0001f440 [Observation][/bold blue]\n{observation}")
+                        obs_str = str(observation)
+                        
+                        # --- PRE-LLM TRUNCATION SHIELD (Moved here) ---
+                        max_tokens = self.memory.max_tokens
+                        cptr = getattr(self.memory, "chars_per_token", 3.5)
+                        current_chars = sum(len(str(m.content)) for m in self.state.history)
+                        available_chars = int((max_tokens - 500) * cptr) - current_chars
+
+                        if len(obs_str) > available_chars and available_chars > 0:
+                            truncated_obs = obs_str[:max(0, available_chars - 300)]
+                            truncated_obs += "\n\n... [SYSTEM WARNING: Observation truncated due to context limits. Use the 'limit' and 'offset' parameters to page through results, or use extract_code_structure.]"
+                            observation = truncated_obs
+                            iter_span.set_attribute("context.forced_truncation", True)
 
                         obs_str = str(observation).lower()
                         is_violation = obs_str.startswith("error: command blocked by sandbox") or obs_str.startswith(
