@@ -7,7 +7,7 @@ PACKAGE_JSON = apps/vscode-extension/package.json
 # Dynamically extract version using node -p
 VERSION := $(shell node -p "require('./$(PACKAGE_JSON)').version")
 
-.PHONY: setup dev clean clean-full lint test build-backend package test
+.PHONY: setup dev clean clean-full lint test typecheck test-cov build-backend package test
 
 test: test-python test-node
 
@@ -33,6 +33,14 @@ lint:
 	@echo "Running linters..."
 	@cd apps/vscode-extension && npm run lint || true
 	@flake8 services/orchestrator/src/ || true
+
+typecheck:
+	@echo "Running mypy type checker..."
+	mypy services/orchestrator/src --ignore-missing-imports
+
+test-cov:
+	@echo "Running tests with coverage..."
+	pytest services/orchestrator/tests --asyncio-mode=auto --cov=services/orchestrator/src --cov-report=html --cov-report=term-missing
 
 test:
 	@echo "Running tests..."

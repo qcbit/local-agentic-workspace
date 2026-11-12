@@ -1,6 +1,7 @@
 import logging
 import os
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 from openai import OpenAI
@@ -53,10 +54,14 @@ class UniversalLLMProvider:
         proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
 
-        if "127.0.0.1" in endpoint_url or "localhost" in endpoint_url or "11434" in endpoint_url:
+        parsed = urlparse(endpoint_url)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+
+        if host in ("127.0.0.1", "localhost", "0.0.0.0") or port == 11434:
             self.client = OpenAI(base_url=base_url, api_key="ollama", http_client=http_client)
         else:
-            if "azure.com" in endpoint_url and (not api_key or api_key.lower() in ["none", ""]):
+            if (host == "azure.com" or host.endswith(".azure.com")) and (not api_key or api_key.lower() in ["none", ""]):
                 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
                 token_provider = get_bearer_token_provider(
@@ -69,7 +74,9 @@ class UniversalLLMProvider:
 
     def generate(self, context: list, require_json: bool = True) -> Optional[str]:
         try:
-            if "azure.com" in self.endpoint_url and "/responses" in self.endpoint_url:
+            parsed = urlparse(self.endpoint_url)
+            host = (parsed.hostname or "").lower()
+            if (host == "azure.com" or host.endswith(".azure.com")) and "/responses" in self.endpoint_url:
                 response = self.client.responses.create(model=self.model, input=context)
                 self._log_token_usage(response, context)
                 try:
