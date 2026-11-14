@@ -29,3 +29,4 @@ class AgentState:
     summary: str = ""
     run_id: str = ""
     workflow_context: Optional[Dict[str, Any]] = None
+    total_tokens: int = 0

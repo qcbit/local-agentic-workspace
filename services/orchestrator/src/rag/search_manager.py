@@ -109,7 +109,7 @@ class SearchManager:
 
     async def _fetch_brave(self, query: str, api_key: str) -> List[Dict[str, str]]:
         url = "https://api.search.brave.com/res/v1/web/search"
-        params = {"q": query, "count": 5}
+        params: Dict[str, str] = {"q": str(query), "format": "json"}
         headers = {
             "Accept": "application/json",
             "X-Subscription-Token": api_key
@@ -131,7 +131,7 @@ class SearchManager:
 
     async def _fetch_searxng(self, query: str, base_url: str) -> List[Dict[str, str]]:
         endpoint = f"{base_url.rstrip('/')}/search"
-        params = {"q": query, "format": "json"}
+        params: Dict[str, str] = {"q": query, "format": "json"}
         async with aiohttp.ClientSession() as session:
             async with session.get(endpoint, params=params) as resp:
                 resp.raise_for_status()
