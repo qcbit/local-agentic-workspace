@@ -1,3 +1,5 @@
+import { expect, jest, test, describe, it, beforeAll, afterEach } from '@jest/globals';
+
 // 🎯 Define mocks at the very top level before any module imports occur
 const mockPostMessage = jest.fn();
 const mockApi = {
@@ -129,7 +131,7 @@ describe('SettingsPanel Component', () => {
         // The updateSetting call should contain the intact compaction block
         // AND the undocumented `experimental` key, in addition to the new llm value.
         const updateSettingCall = mockPostMessage.mock.calls.find(
-            args => args && args[0] && args[0].command === 'updateSetting'
+            (args: any[]) => args && args[0] && args[0].command === 'updateSetting'
         );
         expect(updateSettingCall).toBeDefined();
 

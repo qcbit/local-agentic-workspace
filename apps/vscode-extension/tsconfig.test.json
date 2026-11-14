@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "out"
+  },
+  "exclude": [
+    "node_modules",
+    ".vscode-test",
+    "src/webview/**/*.test.ts",
+    "src/webview/**/*.test.tsx"
+  ],
+  "include": [
+    "src/**/*"
+  ]
+}
