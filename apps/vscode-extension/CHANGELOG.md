@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.20.7](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.6...v0.20.7) (2026-11-14)
+
+
+### Bug Fixes
+
+* **orchestrator:** session history, RAG, IPC & LLM provider fixes + C… ([0414251](https://github.com/qcbit/local-agentic-workspace/commit/0414251a9c3a70b197637a9e9c8faf4959a8d5ea))
+* **orchestrator:** session history, RAG, IPC & LLM provider fixes + CI regression suite ([368bad9](https://github.com/qcbit/local-agentic-workspace/commit/368bad9067d203451f79f17da8be62dc720028c7))
+
 ## [0.20.6](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.5...v0.20.6) (2026-11-10)
 
 
