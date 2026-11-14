@@ -44,7 +44,7 @@ from pathlib import Path
 import pydantic
 import socket
 import stat
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 import uuid
 
 # 🎯 FAILSAFE: Force UTF-8 encoding on Windows to prevent emoji crashes
@@ -243,7 +243,7 @@ class JsonRpcUdsServer:
         self.config = load_config()
         setup_logging(self.config)
         self.running = False
-        self.notification_handlers = {}
+        self.notification_handlers: Dict[str, Any] = {}
         self.workspace_root = workspace_root
         logger.info("Initializing LanceDB Vector Store...")
         self.vector_store = LocalVectorStore(workspace_root=workspace_root, config=self.config)
@@ -252,10 +252,10 @@ class JsonRpcUdsServer:
         self.message_store = MessageStore(db_path=db_path)
         logger.info("Initializing KùzuDB Semantic Graph...")
         self.semantic_graph = SemanticGraphStore(workspace_root=workspace_root)
-        self.pending_requests = {}
-        self.active_writer = None
-        self.persistent_agent = None
-        self.sync_queue = asyncio.Queue()
+        self.pending_requests: Dict[str, asyncio.Future] = {}
+        self.active_writer: Optional[asyncio.StreamWriter] = None
+        self.persistent_agent: Optional[Agent] = None
+        self.sync_queue: asyncio.Queue[Tuple[str, str, str]] = asyncio.Queue()
         self.sync_task = None
 
     def register_notification_handler(self, method_name: str, callback_coroutine):
@@ -383,7 +383,7 @@ class JsonRpcUdsServer:
         except Exception as e:
             logger.error(f"Error dispatching request: {e}")
 
-    async def request_client_context(self, method: str, params: dict = None) -> dict:        
+    async def request_client_context(self, method: str, params: Optional[dict] = None) -> dict:        
         """Sends a JSON-RPC request to VS Code and awaits the response."""
         if not self.active_writer:
             raise ConnectionError("No active VS Code client connected.")
@@ -510,8 +510,12 @@ class JsonRpcUdsServer:
                     return self._error_response(req_id, -32000, f"Agent execution error: {str(e)}")
                     
             elif method == "cancel_agent_task":
-                if self.persistent_agent and hasattr(self.persistent_agent, 'state'):
-                    self.persistent_agent.state.is_canceled = True
+                agent = self.persistent_agent
+                if not agent:
+                    return self._error_response(req_id, -32000, "No active agent session.")
+                
+                if hasattr(agent, 'state'):
+                    agent.state.is_canceled = True
                     logger.info("🛑 Emergency brake pulled via request! Stopping agent loop...")
                     for rid, future in self.pending_requests.items():
                         if not future.done():
@@ -520,6 +524,10 @@ class JsonRpcUdsServer:
                 return self._success_response(req_id, {"status": "canceled"})
 
             elif method == "resume_agent_task":
+                agent = self.persistent_agent
+                if not agent:
+                    return self._error_response(req_id, -32000, "No active agent session to resume.")
+                
                 mode = params.get("mode", "continue")
                 is_auto_approve = extract_auto_approve(params)
                 if isinstance(is_auto_approve, str):
@@ -527,19 +535,16 @@ class JsonRpcUdsServer:
                 else:
                     is_auto_approve = bool(is_auto_approve)
                 
-                if not self.persistent_agent:
-                    return self._error_response(req_id, -32000, "No active agent session to resume.")
-                
                 if mode == "unhinged":
-                    self.persistent_agent.state.max_iterations = 999999
+                    agent.state.max_iterations = 999999
                     logger.info("⚠️ Agent is now UNHINGED. Infinite loop limit removed.")
                 else:
-                    self.persistent_agent.state.iterations = 0
-                    self.persistent_agent.state.max_iterations = self.persistent_agent.max_iterations
-                    logger.info(f"🔄 Agent iterations reset. Resuming task (max_iterations={self.persistent_agent.max_iterations}).")
+                    agent.state.iterations = 0
+                    agent.state.max_iterations = agent.max_iterations
+                    logger.info(f"🔄 Agent iterations reset. Resuming task (max_iterations={agent.max_iterations}).")
                 
                 # Resume without passing a new goal so it picks up where it left off
-                result_state = await self._run_agent_async(None, auto_approve=is_auto_approve)
+                result_state = await agent.run(None, auto_approve=is_auto_approve)
                 
                 if not result_state.is_complete and not result_state.is_canceled:
                     return self._success_response(req_id, {
@@ -704,7 +709,7 @@ class JsonRpcUdsServer:
                 if not session_id:
                     return self._error_response(req_id, -32602, "session_id is required to restore state.")
                 
-                self._ensure_agent()
+                self._ensure_agent(session_id=session_id)
                 self.persistent_agent.state.run_id = session_id
                 
                 # The agent loop will automatically call context_manager.rehydrate() 
@@ -763,9 +768,12 @@ class JsonRpcUdsServer:
         logger.info(f"🗑️ [IPC] delete_file called for: {file_path} (deleted={deleted})")
         return {"status": "success", "deleted_path": file_path, "deleted": bool(deleted)}
 
-    def _ensure_agent(self):
+    def _ensure_agent(self, session_id: Optional[str] = None):
         """Initializes the persistent agent if it doesn't exist."""
         if self.persistent_agent is not None:
+            # Sync the session_id to the existing agent if we are starting a new session
+            if session_id and not self.persistent_agent.state.history:
+                self.persistent_agent.state.run_id = session_id
             return
 
         active_profile_name = self.config.get("active_profile", "home")
@@ -786,18 +794,24 @@ class JsonRpcUdsServer:
         llm = UniversalLLMProvider(endpoint_url=endpoint, model=model_name, api_key=api_key)
         
         # workspace_root is defined globally at the top of uds_server.py
-        self.persistent_agent = Agent(llm_provider=llm, config=active_config, uds_server=self, workspace_root=workspace_root)
+        self.persistent_agent = Agent(
+            llm_provider=llm, 
+            config=active_config, 
+            uds_server=self, 
+            workspace_root=workspace_root,
+            session_id=session_id
+        )
 
     async def _run_agent_async(
         self,
-        goal: str,
+        goal: Optional[str] = None,
         auto_approve: bool = False,
         workflow_config: Optional[Dict[str, Any]] = None,
-        history: list = None,
+        history: Optional[list] = None,
         session_id: Optional[str] = None
     ):
         """Asynchronously instantiates and runs the agent."""
-        self._ensure_agent()
+        self._ensure_agent(session_id=session_id)
         if session_id and not self.persistent_agent.state.history:
             self.persistent_agent.state.run_id = session_id
         state = await self.persistent_agent.run(goal, auto_approve=auto_approve, workflow_config=workflow_config, history_payload=history)

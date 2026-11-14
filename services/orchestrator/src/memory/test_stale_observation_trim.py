@@ -12,12 +12,13 @@ Verifies that:
 import sys
 import os
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 
-from services.orchestrator.src.agent.state import Role, Message, State
+from services.orchestrator.src.agent.state import Role, Message, AgentState
 from services.orchestrator.src.memory.context_manager import SlidingContextManager
 
 
@@ -32,14 +33,14 @@ def _make_message(role: Role, content: str, name: str | None = None) -> Message:
     return Message(role=role, name=None, content=content)
 
 
-def _make_state(history: list[Message], user_goal: str = "Implement a feature") -> State:
+def _make_state(history: list[Message], user_goal: str = "Implement a feature") -> AgentState:
     """Helper to build a State instance."""
-    state = State(user_goal=user_goal, summary=None)
+    state = AgentState(user_goal=user_goal, summary="")
     state.history = history
     return state
 
 
-def _make_manager(retain_recent_observations: int = 2, max_tokens: int = 50000) -> SlidingContextManager:
+def _make_manager(retain_recent_observations: int = 2, max_tokens: int = 50000, state: Optional[AgentState] = None) -> SlidingContextManager:
     """Helper to build a SlidingContextManager with a mock provider."""
     mock_provider = SimpleNamespace(
         chars_per_token=4.0,
@@ -49,10 +50,15 @@ def _make_manager(retain_recent_observations: int = 2, max_tokens: int = 50000) 
         "max_tokens": max_tokens,
         "retain_recent_observations": retain_recent_observations,
     }
+
+    if state is None:
+        state = AgentState(user_goal="Implement a feature", summary="")
+        
     return SlidingContextManager(
         memory_config=memory_config,
         model_name="test-model",
         llm_provider=mock_provider,
+        state=state
     )
 
 

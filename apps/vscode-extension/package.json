@@ -119,8 +119,8 @@
     "watch": "npm run watch:extension & npm run watch:webview",
     "watch:extension": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --watch=forever",
     "watch:webview": "node esbuild.webview.js --watch",
-    "test": "tsc -p ./ && node ./out/test/runTest.js",
-    "test:webview": "NODE_OPTIONS='--experimental-vm-modules' jest src/webview",
+    "test": "tsc -p ./tsconfig.test.json && node ./out/test/runTest.js",
+    "test:webview": "NODE_OPTIONS='--experimental-vm-modules' jest --config=jest.config.js src/webview",
     "build:webview": "node esbuild.webview.js",
     "build:extension": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node"
   },

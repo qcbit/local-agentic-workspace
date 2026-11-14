@@ -130,7 +130,7 @@ class MessageStore:
             rows = await cursor.fetchall()
         
         # Reverse to chronological order
-        return [MessageRow(*row) for row in reversed(rows)]
+        return [MessageRow(*row) for row in reversed(list(rows))]
 
     async def total_tokens(self, session_id: str) -> int:
         assert self._conn is not None, "MessageStore is not open"

@@ -7,7 +7,7 @@ PACKAGE_JSON = apps/vscode-extension/package.json
 # Dynamically extract version using node -p
 VERSION := $(shell node -p "require('./$(PACKAGE_JSON)').version")
 
-.PHONY: setup dev clean clean-full lint test build-backend package test
+.PHONY: setup dev clean clean-full lint test build-backend package test typecheck test-cov
 
 test: test-python test-node
 
@@ -20,6 +20,14 @@ test-node:
 	@cd apps/vscode-extension && npm run test:webview
 	@echo "Running VS Code Extension Tests..."
 	@cd apps/vscode-extension && npm run test
+
+typecheck:
+	@echo "Running mypy type checker..."
+	@mypy services/orchestrator/src --ignore-missing-imports
+
+test-cov:
+	@echo "Running pytest with coverage..."
+	@cd services/orchestrator && pytest --asyncio-mode=auto --cov=src --cov-report=html --cov-report=term
 
 setup:
 	@echo "Setting up local development environment..."

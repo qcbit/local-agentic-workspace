@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import List
+from typing import List, Tuple
 from tree_sitter import Language, Parser
 import tree_sitter_python as tspython
 import tree_sitter_typescript as tstypescript
@@ -28,7 +28,7 @@ class SemanticChunker:
         lang = Language(language_ptr)
         return Parser(lang)
 
-    def chunk_file(self, file_path: str, content: str) -> List[str]:
+    def chunk_file(self, file_path: str, content: str) -> Tuple[List[str], str]:
         """Parses a file and returns semantic chunks. Falls back to basic chunking if unsupported."""
         ext = os.path.splitext(file_path)[1].lower()
         

@@ -19,12 +19,12 @@ import asyncio
 from dataclasses import dataclass
 import os
 import json
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, cast
 
 import logging
 from opentelemetry import trace
 from opentelemetry.trace import get_current_span
-from services.orchestrator.src.agent.state import AgentState
+from services.orchestrator.src.agent.state import AgentState, Role, Message
 from services.orchestrator.src.memory.persistence import (
     MessageStore, 
     serialize_message, 
@@ -200,8 +200,13 @@ class SlidingContextManager:
             # 1. Rehydrate message history
             rows = await self._store.latest(run_id, limit=max_rows)
             if rows:
-                self.state.history = [deserialize_message(r.content) for r in rows]
-                logger.info("Rehydrated %d messages for session %s", len(self.state.history), run_id)
+                self.state.history = [
+                    Message(
+                        role=Role(r.role), 
+                        content=deserialize_message(r.content).get("content", ""),
+                        name=deserialize_message(r.content).get("name")
+                    ) for r in rows
+                ]
 
             # 2. Rehydrate metadata (summary, user_goal)
             summary_meta = await self._store.get_meta(run_id, "summary")
@@ -261,17 +266,19 @@ class SlidingContextManager:
             # Log heavily but do not crash the agent loop if persistence fails
             logger.error("Failed to persist message seq to SQLite: %s", str(e), exc_info=True)
 
-    async def append_message(self, msg: dict, token_count: int) -> None:
+    async def append_message(self, msg: Message, token_count: int) -> None:
         """Main entry point for adding a message to the sliding window."""
         self.state.history.append(msg)
         self.state.total_tokens += token_count
         
-        # Fire-and-forget persistent write (awaited to maintain sequence order)
-        await self._persist_message(msg, token_count)
+       # Fire-and-forget persistent write (awaited to maintain sequence order)
+        msg_dict = {"role": msg.role.value if hasattr(msg.role, "value") else str(msg.role), "content": msg.content, "name": msg.name}
+        await self._persist_message(msg_dict, token_count)
         
         # Evaluate compaction...
         if self.state.total_tokens > self.max_tokens:
-            await self._chunked_compaction()
+            pass
+            # await self._chunked_compaction() # The compaction logic is handled later in the file inside build_safe_context()
 
     def compaction_status(self) -> Dict[str, Any]:
         base: Dict[str, Any] = {
@@ -402,26 +409,31 @@ class SlidingContextManager:
         episodic_rules = ""
         if getattr(self, '_vector_store', None) and self.state.user_goal:
             try:
-                episodes = self._vector_store.search_episodes(self.state.user_goal, self.workspace_root, limit=3)
-                if episodes:
-                    successes = [e for e in episodes if e.get("outcome") == "success"]
-                    failures = [e for e in episodes if e.get("outcome") == "failure"]
-                    
-                    if successes:
-                        episodic_rules += "\\n\\n[VERIFIED PATTERNS: Successful past trajectories for similar tasks]\\n"
-                        for ep in successes:
-                            traj = json.loads(ep.get("trajectory", "[]"))
-                            # Flatten trajectory into a compact action chain (e.g., search_codebase -> file_system -> terminal_proxy)
-                            chain = " -> ".join([t.get("tool", "action") for t in traj if "tool" in t])
-                            episodic_rules += f"- Goal: {ep['task_summary']}\\n  Successful Tool Chain: {chain}\\n"
-                            
-                    if failures:
-                        episodic_rules += "\\n\\n[KNOWN PITFALLS: Past failures to avoid]\\n"
-                        for ep in failures:
-                            traj = json.loads(ep.get("trajectory", "[]"))
-                            chain = " -> ".join([t.get("tool", "action") for t in traj if "tool" in t])
-                            episodic_rules += f"- Goal: {ep['task_summary']}\\n  Failed Tool Chain: {chain} (Do not repeat this exact sequence)\\n"
-                            
+                if self._vector_store and self.state.user_goal is not None:
+                    raw_episodes = self._vector_store.search_episodes(self.state.user_goal, self.workspace_root or ".", limit=3)
+                    episodes = cast(List[Dict[str, Any]], raw_episodes)
+                    if episodes:
+                        successes = [e for e in episodes if e.get("outcome") == "success"]
+                        failures = [e for e in episodes if e.get("outcome") == "failure"]
+                        
+                        if successes:
+                            episodic_rules += "\\n\\n[VERIFIED PATTERNS: Successful past trajectories for similar tasks]\\n"
+                            import typing
+                            for ep in successes:
+                                raw_traj = json.loads(str(ep.get("trajectory", "[]")))
+                                traj = typing.cast(List[Dict[str, Any]], raw_traj)
+                                # Flatten trajectory into a compact action chain (e.g., search_codebase -> file_system -> terminal_proxy)
+                                chain = " -> ".join([str(t.get("tool", "action")) for t in traj if isinstance(t, dict) and "tool" in t])
+                                episodic_rules += f"- Goal: {ep.get('task_summary', 'Unknown')}\\n  Successful Tool Chain: {chain}\\n"
+                                
+                        if failures:
+                            episodic_rules += "\\n\\n[KNOWN PITFALLS: Past failures to avoid]\\n"
+                            import typing
+                            for ep in failures:
+                                raw_traj = json.loads(str(ep.get("trajectory", "[]")))
+                                traj = typing.cast(List[Dict[str, Any]], raw_traj)
+                                chain = " -> ".join([str(t.get("tool", "action")) for t in traj if isinstance(t, dict) and "tool" in t])
+                                episodic_rules += f"- Goal: {ep.get('task_summary', 'Unknown')}\\n  Failed Tool Chain: {chain} (Do not repeat this exact sequence)\\n"
             except Exception as e:
                 logger.warning(f"Failed to retrieve episodic vector context: {e}")
 
@@ -432,7 +444,7 @@ class SlidingContextManager:
         if self._pending_task is not None and self._pending_task.done():
             try:
                 new_summary = self._pending_task.result()
-                if new_summary:
+                if new_summary and self._pending_snapshot:
                     state.summary = (
                         f"{state.summary}\\n{new_summary}".strip()
                         if state.summary

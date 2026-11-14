@@ -54,7 +54,7 @@ class UniversalLLMProvider:
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
 
         if "127.0.0.1" in endpoint_url or "localhost" in endpoint_url or "11434" in endpoint_url:
-            self.client = OpenAI(base_url=base_url, api_key="ollama", http_client=http_client)
+            self.client = OpenAI(base_url=base_url, api_key="ollama", http_client=http_client) # type: ignore
         else:
             if "azure.com" in endpoint_url and (not api_key or api_key.lower() in ["none", ""]):
                 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
@@ -63,9 +63,9 @@ class UniversalLLMProvider:
                     DefaultAzureCredential(), "https://ai.azure.com/.default"
                 )
                 logger.info("\ud83d\udd10 Azure Entra ID authentication enabled via OpenAI SDK.")
-                self.client = OpenAI(base_url=base_url, api_key=token_provider, http_client=http_client)
+                self.client = OpenAI(base_url=base_url, api_key=token_provider, http_client=http_client) # type: ignore
             else:
-                self.client = OpenAI(base_url=base_url, api_key=api_key or "sk-dummy", http_client=http_client)
+                self.client = OpenAI(base_url=base_url, api_key=api_key or "sk-dummy", http_client=http_client) # type: ignore
 
     def generate(self, context: list, require_json: bool = True) -> Optional[str]:
         try:
@@ -73,16 +73,31 @@ class UniversalLLMProvider:
                 response = self.client.responses.create(model=self.model, input=context)
                 self._log_token_usage(response, context)
                 try:
-                    return response.output[0].content[0].text
+                    import typing
+                    return typing.cast(typing.Any, response).output[0].content[0].text
                 except (KeyError, IndexError, AttributeError):
                     return str(getattr(response, "output", response))
             else:
-                kwargs = {"model": self.model, "messages": context}
                 if require_json:
-                    kwargs["response_format"] = {"type": "json_object"}
-                response = self.client.chat.completions.create(**kwargs)
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=context, # type: ignore
+                        response_format={"type": "json_object"}
+                    )
+                else:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=context # type: ignore
+                    )
+                
                 self._log_token_usage(response, context)
-                return response.choices[0].message.content
+                
+                import typing
+                resp_any = typing.cast(typing.Any, response)
+                if hasattr(resp_any, "output") and isinstance(resp_any.output, list) and len(resp_any.output) > 0:
+                    if hasattr(resp_any.output[0], "content") and isinstance(resp_any.output[0].content, list) and len(resp_any.output[0].content) > 0:
+                        return resp_any.output[0].content[0].text
+                return str(getattr(response, "output", response))
         except Exception as e:
             logger.error(f"\u274c [SDK Connection Error] Failed to generate: {e}")
             raise RuntimeError(f"LLM Provider unreachable: {e}")
