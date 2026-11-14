@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 from services.orchestrator.src.agent.ast_parser import CodebaseASTParser
 from services.orchestrator.src.rag.search_manager import SearchManager
@@ -200,8 +200,8 @@ class ToolRegistry:
         """Formats tool descriptions with explicit parameter names, types, enums, and required flags."""
         lines = []
         for name, info in self.tools.items():
-            desc = info.get("description", "")
-            params = info.get("parameters", {})
+            desc = cast(dict, info).get("description", "")
+            params = cast(dict, info).get("parameters", {})
             props = params.get("properties", {})
             req = set(params.get("required", []))
 
@@ -289,7 +289,7 @@ class ToolRegistry:
         """Validates tool_args against the tool's JSON schema and returns an actionable error hint if invalid."""
         if tool_name not in self.tools:
             return None
-        schema = self.tools[tool_name].get("parameters", {})
+        schema = cast(dict, self.tools[tool_name]).get("parameters", {})
         props = schema.get("properties", {})
         required = schema.get("required", [])
 
@@ -377,8 +377,8 @@ class ToolRegistry:
                 if str(path_arg).startswith("file://"):
                     path_arg = str(path_arg).replace("file://", "")
 
-                lsp_line = int(line_arg) - 1 if int(line_arg) > 0 else 0
-                lsp_char = int(char_arg)
+                lsp_line = int(line_arg) - 1 if int(line_arg) > 0 else 0  # type: ignore
+                lsp_char: int = int(char_arg)
 
                 if symbol_arg:
                     try:
@@ -420,9 +420,7 @@ class ToolRegistry:
                 if isinstance(response, dict) and "error" in response:
                     return f"LSP Error: {response['error']}"
 
-                refs = response if isinstance(response, list) else response.get("result", [])
-                if not refs:
-                    return "No cross-file references found for this symbol."
+                refs = cast(dict, response).get("result", []) if isinstance(response, dict) else cast(list, response)
 
                 def find_line(obj):
                     if isinstance(obj, dict):
@@ -446,14 +444,14 @@ class ToolRegistry:
                     line_num = "Unknown"
                     found_line = find_line(loc.get("range") or loc.get("targetSelectionRange") or loc)
                     if found_line is not None:
-                        line_num = int(found_line) + 1
+                        line_num = str(int(found_line) + 1)
                     formatted_response += f"- File: {file_path} (Line: {line_num})\n"
                 return formatted_response
 
             elif tool_name == "extract_code_structure":
                 ast_parser = CodebaseASTParser()
                 return ast_parser.get_node_at_line(
-                    arguments.get("file_path"), int(arguments.get("line_number", 0))
+                    str(arguments.get("file_path", "")), int(arguments.get("line_number", 0))
                 )
             else:
                 return f"Tool {tool_name} not found."

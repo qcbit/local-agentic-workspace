@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 import uuid
 
 from loguru import logger
@@ -39,6 +39,7 @@ class Agent:
         uds_server=None,
         workspace_root: Optional[str] = None,
         permission_callback=None,
+        session_id: Optional[str] = None,
     ):
         self.llm_provider = llm_provider
         self.uds_server = uds_server
@@ -46,8 +47,9 @@ class Agent:
         self.sandbox_config = config.get("sandbox", {})
         self.search_config = config.get("search", {})
         self.auto_approve = False
-        self.user_inbox = asyncio.Queue()
+        self.user_inbox: asyncio.Queue[str] = asyncio.Queue()
         self.state = AgentState(user_goal="")
+        self.state.run_id = session_id or str(uuid.uuid4())
 
         llm_config = config.get("llm", {})
         memory_config = config.get("memory", {})
@@ -324,11 +326,55 @@ class Agent:
             if getattr(self.memory, "rehydrate", None):
                 await self.memory.rehydrate()
 
+                normalized_history = []
+                for item in self.state.history:
+                    # 1. Already a Message object
+                    if hasattr(item, "role") and hasattr(item, "content"):
+                        if not isinstance(item.content, str):
+                            item.content = json.dumps(item.content)
+                        normalized_history.append(item)
+                    
+                    # 2. Dictionary (e.g., from SQLite fetch or UI payload)
+                    elif isinstance(item, dict):
+                        role_str = str(item.get("role", "user")).lower()
+                        raw_content = item.get("content", "")
+                        
+                        # Un-escape stringified strings, but leave stringified JSON objects as strings
+                        if isinstance(raw_content, str):
+                            try:
+                                parsed = json.loads(raw_content)
+                                if isinstance(parsed, str):
+                                    raw_content = parsed
+                            except Exception:
+                                pass
+                        
+                        # Guarantee the final payload to the LLM is a string
+                        if not isinstance(raw_content, str):
+                            raw_content = json.dumps(raw_content)
+                            
+                        try:
+                            role_enum = Role(role_str)
+                        except ValueError:
+                            role_enum = Role.USER
+                            
+                        normalized_history.append(Message(role=role_enum, content=raw_content))
+                        
+                    # 3. Raw string fallback
+                    elif isinstance(item, str):
+                        raw_item = str(item)
+                        try:
+                            parsed = json.loads(raw_item)
+                            if isinstance(parsed, str):
+                                raw_item = parsed
+                        except Exception:
+                            pass
+                        normalized_history.append(Message(role=Role.USER, content=raw_item))
+                        
+                self.state.history = normalized_history
+
             def log(msg: str):
                 if ui_callback:
                     ui_callback(msg)
-                else:
-                    logger.info(msg)
 
             # Only fall back to UI history_payload if SQLite rehydration yielded no history
             if history_payload and not self.state.history:
@@ -404,7 +450,7 @@ class Agent:
                         self.dispatcher.sandbox_config = self.sandbox_config
                     if "search" in orch_cfg:
                         self.search_config.update(orch_cfg["search"])
-                    self.state.workflow_context = workflow_config.get("context_engineering", {})
+                    self.state.workflow_context = cast(dict, workflow_config).get("context_engineering", {})
                     for action in workflow_config.get("pre_flight_actions", []):
                         tool = action.get("tool")
                         args = action.get("args", {})
@@ -431,7 +477,7 @@ class Agent:
                     tool_descriptions = self.tool_registry.get_formatted_tool_descriptions()
                 else:
                     tool_descriptions = "\n".join(
-                        [f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()]
+                        [f"- {name}: {info['description']}" for name, info in self.tool_registry.tools.items()]  # type: ignore
                     )
 
                 # --- Load system prompt from external template file ---
@@ -736,7 +782,8 @@ class Agent:
                                     tool_args["max_chars"] = getattr(self.dispatcher, "max_file_read_chars", 4000)
 
                                 # --- Execute the tool asynchronously ---
-                                observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
+                                raw_obs = await self.tool_registry.execute_tool_async(tool_name, tool_args)
+                                observation = raw_obs if raw_obs is not None else "No observation returned."
 
                                 # Post-execution breadcrumb logging
                                 if tool_name == "search_codebase":
@@ -795,7 +842,8 @@ class Agent:
                                                 tool_name, tool_args, auto_approve=True
                                             )
                                     else:
-                                        observation = await self.tool_registry.execute_tool_async(tool_name, tool_args)
+                                        raw_obs = await self.tool_registry.execute_tool_async(tool_name, tool_args)
+                                        observation = raw_obs if raw_obs is not None else "No observation returned."
                                 finally:
                                     self.dispatcher.sandbox_config["strict_mode"] = old_strict
                                 is_violation = False
@@ -807,7 +855,7 @@ class Agent:
                                     "Task aborted by system sandbox constraints. "
                                     "The requested action was blocked for security reasons."
                                 )
-                                self.state.summary = clean_error_msg
+                                self.state.summary = str(clean_error_msg) # type: ignore
                                 msg = Message(role=Role.TOOL, content=self.state.summary, name="finish_task")
                                 self.state.history.append(msg)
                                 await self._save_message(msg)
@@ -886,11 +934,11 @@ class Agent:
                         "governance.cumulative_token_count_at_termination", int(self.cumulative_token_count)
                     )
 
-                self.state.summary = (
+                self.state.summary = str(
                     f"\u26a0\ufe0f Agent loop terminated: max_iterations limit "
                     f"({self.state.max_iterations}) reached. The agent was unable "
                     f"to complete the task within the allocated iteration budget."
-                )
+                ) # type: ignore
 
             elif self.state.is_canceled:
                 if parent_span.is_recording():
