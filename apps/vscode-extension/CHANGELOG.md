@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.20.8](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.7...v0.20.8) (2026-11-18)
+
+
+### Bug Fixes
+
+* **CI:** Add missing typecheck and test-cov runs ([82ae81b](https://github.com/qcbit/local-agentic-workspace/commit/82ae81b8277454c758cb26bf023e36f96a47b96c))
+* **CI:** ignore arg type ([82ae81b](https://github.com/qcbit/local-agentic-workspace/commit/82ae81b8277454c758cb26bf023e36f96a47b96c))
+* **CI:** regression test suite fix ([82ae81b](https://github.com/qcbit/local-agentic-workspace/commit/82ae81b8277454c758cb26bf023e36f96a47b96c))
+* sanitize untrusted URLs, remove sensitive logs, harden CI workflows ([2496af8](https://github.com/qcbit/local-agentic-workspace/commit/2496af8aee09a36d79709a3b0c8be38d9c930ac0))
+* sanitize untrusted URLs, remove sensitive logs, harden CI workflows ([82ae81b](https://github.com/qcbit/local-agentic-workspace/commit/82ae81b8277454c758cb26bf023e36f96a47b96c))
+* **test:** observation assertion ([82ae81b](https://github.com/qcbit/local-agentic-workspace/commit/82ae81b8277454c758cb26bf023e36f96a47b96c))
+* **tests:** Circuit breaker and search codebase prefix ([82ae81b](https://github.com/qcbit/local-agentic-workspace/commit/82ae81b8277454c758cb26bf023e36f96a47b96c))
+* **test:** stricter counting logic ([82ae81b](https://github.com/qcbit/local-agentic-workspace/commit/82ae81b8277454c758cb26bf023e36f96a47b96c))
+
 ## [0.20.7](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.6...v0.20.7) (2026-11-14)
 
 
