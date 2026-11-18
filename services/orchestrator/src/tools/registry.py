@@ -495,7 +495,7 @@ class ToolRegistry:
             scope_note = f" within '{path_prefix}'" if path_prefix else ""
             return f"No codebase search results found for query '{query}'{scope_note} (offset: {offset})."
 
-        formatted = [f"Codebase Search Results (Showing {limit} results, offset {offset}):\n"]
+        formatted = [f"Codebase Search Results: (Showing {limit} results, offset {offset})\n"]
         for i, res in enumerate(paged_results, start=offset + 1):
             file_path = res.get("file_path", "unknown")
             content = res.get("content", "")

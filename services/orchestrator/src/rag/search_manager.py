@@ -24,7 +24,7 @@ class SearchManager:
             )
             return response.get("value")
         except Exception as e:
-            logger.warning(f"Failed to fetch secret '{secret_key}' from extension host: {e}")
+            logger.warning("Failed to fetch secret from extension host (%s)", type(e).__name__)
             return None
 
     async def execute_search(
