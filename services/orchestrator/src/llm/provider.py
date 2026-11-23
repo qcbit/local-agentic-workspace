@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast, Any
 from urllib.parse import urlparse
 
 import httpx
@@ -99,8 +99,9 @@ class UniversalLLMProvider:
                 
                 self._log_token_usage(response, context)
                 
-                import typing
-                resp_any = typing.cast(typing.Any, response)
+                resp_any = cast(Any, response)
+                if hasattr(resp_any, "choices") and resp_any.choices:
+                    return resp_any.choices[0].message.content or ""
                 if hasattr(resp_any, "output") and isinstance(resp_any.output, list) and len(resp_any.output) > 0:
                     if hasattr(resp_any.output[0], "content") and isinstance(resp_any.output[0].content, list) and len(resp_any.output[0].content) > 0:
                         return resp_any.output[0].content[0].text

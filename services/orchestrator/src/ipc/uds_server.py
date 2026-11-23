@@ -257,10 +257,27 @@ class JsonRpcUdsServer:
         self.persistent_agent: Optional[Agent] = None
         self.sync_queue: asyncio.Queue[Tuple[str, str, str]] = asyncio.Queue()
         self.sync_task = None
+        self.active_agent_task: Optional[asyncio.Task] = None
 
     def register_notification_handler(self, method_name: str, callback_coroutine):
         """Registers an async callback for a specific incoming notification."""
         self.notification_handlers[method_name] = callback_coroutine
+
+    async def _cancel_active_task(self) -> None:
+        """Cancels the currently running agent task and clears pending requests."""
+        if self.persistent_agent and hasattr(self.persistent_agent, "state"):
+            self.persistent_agent.state.is_canceled = True
+        for rid, future in list(self.pending_requests.items()):
+            if not future.done():
+                future.set_result({"status": "denied", "content": "Action Blocked: Task was canceled."})
+        self.pending_requests.clear()
+        if self.active_agent_task and not self.active_agent_task.done():
+            self.active_agent_task.cancel()
+            try:
+                await self.active_agent_task
+            except asyncio.CancelledError:
+                pass
+        self.active_agent_task = None
 
     async def _sync_worker(self):
         """Background worker that pulls files from the queue and indexes them without blocking the event loop."""
@@ -318,14 +335,8 @@ class JsonRpcUdsServer:
                     logger.info(f"📥 [IPC] Received notification: {method}")
                     
                     if method == "cancel_agent_task":
-                        if self.persistent_agent and hasattr(self.persistent_agent, 'state'):
-                            self.persistent_agent.state.is_canceled = True
-                            logger.info("🛑 Emergency brake pulled! Stopping agent loop...")
-                            # Unblock any pending IPC UI requests immediately
-                            for req_id, future in self.pending_requests.items():
-                                if not future.done():
-                                    future.set_result({"status": "denied", "content": "Action Blocked: Task was canceled."})
-                            self.pending_requests.clear()
+                        logger.info("🛑 Emergency brake pulled! Stopping agent loop...")
+                        await self._cancel_active_task()
                         continue
 
                     if method in self.notification_handlers:
@@ -493,7 +504,7 @@ class JsonRpcUdsServer:
                             "iterations": result_state.iterations
                         })
 
-                    final_observation = "Task failed or max iterations reached."
+                    final_observation = result_state.summary or "Task failed or max iterations reached."
                     if result_state.is_complete and result_state.history:
                         last_msg = result_state.history[-1]
                         if last_msg.name == "finish_task":
@@ -510,52 +521,56 @@ class JsonRpcUdsServer:
                     return self._error_response(req_id, -32000, f"Agent execution error: {str(e)}")
                     
             elif method == "cancel_agent_task":
-                agent = self.persistent_agent
-                if not agent:
+                if not self.persistent_agent and not self.active_agent_task:
                     return self._error_response(req_id, -32000, "No active agent session.")
                 
-                if hasattr(agent, 'state'):
-                    agent.state.is_canceled = True
-                    logger.info("🛑 Emergency brake pulled via request! Stopping agent loop...")
-                    for rid, future in self.pending_requests.items():
-                        if not future.done():
-                            future.set_result({"status": "denied", "content": "Action Blocked: Task was canceled."})
-                    self.pending_requests.clear()
+                logger.info("🛑 Emergency brake pulled via request! Stopping agent loop...")
+                await self._cancel_active_task()
                 return self._success_response(req_id, {"status": "canceled"})
 
             elif method == "resume_agent_task":
                 agent = self.persistent_agent
                 if not agent:
                     return self._error_response(req_id, -32000, "No active agent session to resume.")
-                
+
                 mode = params.get("mode", "continue") if isinstance(params, dict) else "continue"
                 is_auto_approve = extract_auto_approve(params)
                 if isinstance(is_auto_approve, str):
                     is_auto_approve = is_auto_approve.lower() == 'true'
                 else:
                     is_auto_approve = bool(is_auto_approve)
-                
+
+                await self._cancel_active_task()
+
                 if mode == "unhinged":
                     agent.state.max_iterations = 999999
                     logger.info("⚠️ Agent is now UNHINGED. Infinite loop limit removed.")
                 else:
                     agent.state.iterations = 0
                     agent.state.max_iterations = agent.max_iterations
-                    
-                result_state = await agent.run(None, auto_approve=is_auto_approve)
-                
+
+                task = asyncio.create_task(agent.run(None, auto_approve=is_auto_approve))
+                self.active_agent_task = task
+                try:
+                    result_state = await task
+                finally:
+                    if self.active_agent_task is task:
+                        self.active_agent_task = None
+
                 if not result_state.is_complete and not result_state.is_canceled:
                     return self._success_response(req_id, {
                         "status": "paused_max_iterations",
                         "iterations": result_state.iterations
                     })
-                    
-                final_observation = "Task failed or max iterations reached."
-                if result_state.history and result_state.history[-1].name == "finish_task":
-                    final_observation = result_state.history[-1].content
-                    
+
+                final_observation = result_state.summary or "Task failed or max iterations reached."
+                if result_state.is_complete and result_state.history:
+                    last_msg = result_state.history[-1]
+                    if last_msg.name == "finish_task":
+                        final_observation = last_msg.content
+
                 return self._success_response(req_id, {
-                    "status": "completed", 
+                    "status": "completed",
                     "iterations": result_state.iterations,
                     "final_observation": final_observation
                 })
@@ -698,6 +713,7 @@ class JsonRpcUdsServer:
             elif method == "search_codebase":
                 return self._success_response(req_id, self._handle_search_codebase(params))
             elif method == "reset_session":
+                await self._cancel_active_task()
                 self.persistent_agent = None
                 logger.info("🗑️ Agent memory wiped for new session.")
                 return self._success_response(req_id, {"status": "cleared"})
@@ -814,15 +830,29 @@ class JsonRpcUdsServer:
         session_id: Optional[str] = None
     ):
         """Asynchronously instantiates and runs the agent."""
+        await self._cancel_active_task()
         self._ensure_agent(session_id=session_id)
-        
+
         agent = self.persistent_agent
         assert agent is not None
-        
+
         if session_id and not agent.state.history:
             agent.state.run_id = session_id
-        state = await agent.run(goal, auto_approve=auto_approve, workflow_config=workflow_config, history_payload=history)
-        return state
+
+        task = asyncio.create_task(
+            agent.run(
+                goal,
+                auto_approve=auto_approve,
+                workflow_config=workflow_config,
+                history_payload=history,
+            )
+        )
+        self.active_agent_task = task
+        try:
+            return await task
+        finally:
+            if self.active_agent_task is task:
+                self.active_agent_task = None
 
     def _success_response(self, req_id: Any, result: Any) -> Dict[str, Any]:
         return {"jsonrpc": "2.0", "result": result, "id": req_id}
@@ -967,9 +997,16 @@ async def handle_terminal_error(params: dict):
             endpoint_url=active_config.get("llm", {}).get("endpoint_url"),
             model=active_config.get("llm", {}).get("model_name")
         )
+        await server._cancel_active_task()
         agent = Agent(llm_provider=llm, config=active_config, uds_server=server)
         logger.info("🧠 [Proactive AI] Spinning up background agent to deduce a fix...")
-        await agent.run(goal)
+        task = asyncio.create_task(agent.run(goal))
+        server.active_agent_task = task
+        try:
+            await task
+        finally:
+            if server.active_agent_task is task:
+                server.active_agent_task = None
     except Exception as e:
         logger.error(f"Failed to start proactive agent: {e}")
 

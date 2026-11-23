@@ -21,14 +21,6 @@ test-node:
 	@echo "Running VS Code Extension Tests..."
 	@cd apps/vscode-extension && npm run test
 
-typecheck:
-	@echo "Running mypy type checker..."
-	@mypy services/orchestrator/src --ignore-missing-imports
-
-test-cov:
-	@echo "Running pytest with coverage..."
-	@cd services/orchestrator && pytest --cov=src --cov-report=html --cov-report=term
-
 setup:
 	@echo "Setting up local development environment..."
 	@bash scripts/bootstrap.sh
@@ -49,11 +41,6 @@ typecheck:
 test-cov:
 	@echo "Running tests with coverage..."
 	pytest services/orchestrator/tests --asyncio-mode=auto --cov=services/orchestrator/src --cov-report=html --cov-report=term-missing
-
-test:
-	@echo "Running tests..."
-	@cd services/orchestrator && pytest
-	@cd apps/vscode-extension && npm test
 
 clean:
 	@echo "Cleaning up standard build files..."
