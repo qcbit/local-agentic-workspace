@@ -200,13 +200,19 @@ class SlidingContextManager:
             # 1. Rehydrate message history
             rows = await self._store.latest(run_id, limit=max_rows)
             if rows:
-                self.state.history = [
-                    Message(
-                        role=Role(r.role), 
-                        content=deserialize_message(r.content).get("content", ""),
-                        name=deserialize_message(r.content).get("name")
-                    ) for r in rows
-                ]
+                rehydrated_history: List[Message] = []
+                for r in rows:
+                    deserialized = deserialize_message(r.content)
+                    if isinstance(deserialized, dict):
+                        content = str(deserialized.get("content", ""))
+                        name = deserialized.get("name")
+                    else:
+                        content = str(deserialized)
+                        name = None
+                    rehydrated_history.append(
+                        Message(role=Role(r.role), content=content, name=name)
+                    )
+                self.state.history = rehydrated_history
 
             # 2. Rehydrate metadata (summary, user_goal)
             summary_meta = await self._store.get_meta(run_id, "summary")
@@ -514,6 +520,8 @@ class SlidingContextManager:
             else:
                 retained_history.insert(0, {"role": mapped_role, "content": content})
                 current_tokens += msg_tokens
+
+        surviving_overflow = overflow_messages
 
         # 5. Trigger Async Compaction (only if no task already in flight)
         if overflow_messages and self._pending_task is None:
