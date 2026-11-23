@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.20.9](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.8...v0.20.9) (2026-11-23)
+
+
+### Bug Fixes
+
+* **CI:** add tests ([2f28982](https://github.com/qcbit/local-agentic-workspace/commit/2f289824c55719e42ed8407c4b0846f17729729f))
+* **CI:** upgrade vs code type engine ([2f28982](https://github.com/qcbit/local-agentic-workspace/commit/2f289824c55719e42ed8407c4b0846f17729729f))
+
 ## [0.20.8](https://github.com/qcbit/local-agentic-workspace/compare/v0.20.7...v0.20.8) (2026-11-18)
 
 
