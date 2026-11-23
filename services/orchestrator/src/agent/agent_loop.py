@@ -294,16 +294,20 @@ class Agent:
             clean_response = markdown_match.group(1)
 
         try:
-            return json.loads(clean_response)
+            obj = json.loads(clean_response)
+            if isinstance(obj, dict) and "tool" in obj:
+                return obj
         except json.JSONDecodeError:
             pass
 
-        match = re.search(r"\{.*\}", raw_response, re.DOTALL)
-        if match:
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", raw_response):
             try:
-                return json.loads(match.group(0))
+                obj, _ = decoder.raw_decode(raw_response[match.start():])
+                if isinstance(obj, dict) and "tool" in obj:
+                    return obj
             except json.JSONDecodeError:
-                pass
+                continue
 
         return {
             "reasoning": "Failed to parse JSON. Remember to output ONLY a single valid JSON object.",
@@ -511,7 +515,7 @@ class Agent:
                 call_counts = self._call_counts
                 file_read_counts = self._file_read_counts
                 visited_breadcrumbs = self._visited_breadcrumbs
-
+                consecutive_parse_errors = 0
                 while (
                     not self.state.is_complete
                     and not self.state.is_canceled
@@ -641,6 +645,39 @@ class Agent:
                         await self._save_message(msg)
 
                         tool_name = llm_response.get("tool", "unknown")
+                        if tool_name == "error":
+                            reasoning_text = str(llm_response.get("reasoning", ""))
+                            if "Connection Error" in reasoning_text:
+                                log("🛑 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
+                                self.state.is_complete = True
+                                self.state.summary = (
+                                    "Task aborted: The LLM provider is unreachable."
+                                )
+                                break
+                            elif "Failed to parse JSON" in reasoning_text:
+                                consecutive_parse_errors += 1
+                                if consecutive_parse_errors >= 2:
+                                    log("🛑 [Circuit Breaker] LLM produced invalid JSON twice in a row. Aborting loop.")
+                                    self.state.is_complete = True
+                                    self.state.summary = (
+                                        "Task aborted: The local engine failed to produce valid JSON "
+                                        "after 2 consecutive attempts."
+                                    )
+                                    break
+                                # Feed a clean correction back to the model and retry
+                                msg = Message(
+                                    role=Role.TOOL,
+                                    content="Error: Your last response was not valid JSON. Output ONLY a single valid JSON object with keys 'reasoning', 'tool', and 'tool_args'.",
+                                    name="json_parser",
+                                    is_noise=True,
+                                )
+                                self.state.history.append(msg)
+                                await self._save_message(msg)
+                                self.state.iterations += 1
+                                continue
+                        else:
+                            consecutive_parse_errors = 0
+
                         tool_args = llm_response.get("tool_args", {})
 
                         iter_span.set_attribute("tool.name", tool_name)
@@ -865,23 +902,6 @@ class Agent:
                                 iter_span.set_attribute("error.message", "Sandbox constraint violation")
                                 iter_span.set_status(
                                     trace.Status(trace.StatusCode.ERROR, "Sandbox constraint violation")
-                                )
-                                break
-
-                        if tool_name == "error":
-                            reasoning_text = str(llm_response.get("reasoning", ""))
-                            if "Connection Error" in reasoning_text:
-                                log("\U0001f6d1 [Circuit Breaker] LLM provider is unreachable. Aborting loop.")
-                                break
-                            elif "Failed to parse JSON" in reasoning_text:
-                                log(
-                                    "\U0001f6d1 [Circuit Breaker] LLM produced invalid JSON (likely context overflow). "
-                                    "Aborting loop to prevent runaway errors."
-                                )
-                                self.state.is_complete = True
-                                self.state.summary = (
-                                    "Task aborted: The local engine failed to produce valid JSON, "
-                                    "likely due to context window exhaustion."
                                 )
                                 break
 
